@@ -1,5 +1,3 @@
-import type { ContentBlock } from '../centrifuge/agp-types.js';
-
 export interface OctoPayload {
   type: number;
   content?: string;
@@ -8,30 +6,20 @@ export interface OctoPayload {
   size?: number;
 }
 
-export function octoToAgp(payload: OctoPayload): ContentBlock[] {
+/**
+ * Render an Octo payload into a single text string suitable for an MCP
+ * channel notification. Non-text payloads are summarised inline so the AI
+ * can still see what arrived.
+ */
+export function octoPayloadToText(payload: OctoPayload): string {
   switch (payload.type) {
     case 1:
-      return [{ type: 'text', text: payload.content ?? '' }];
+      return payload.content ?? '';
     case 2:
-      return [{ type: 'image', url: payload.url }];
+      return `[Image] ${payload.url ?? ''}`.trim();
     case 8:
-      return [
-        {
-          type: 'text',
-          text: `[File] ${payload.name ?? 'unknown'} (${payload.size ?? 0} bytes)`,
-        },
-      ];
+      return `[File] ${payload.name ?? 'unknown'} (${payload.size ?? 0} bytes)`;
     default:
-      return [
-        { type: 'text', text: `[Unsupported message type: ${payload.type}]` },
-      ];
+      return `[Unsupported message type: ${payload.type}]`;
   }
-}
-
-export function agpToOctoPayload(content: ContentBlock[]): OctoPayload {
-  const text = content
-    .filter((b): b is ContentBlock & { type: 'text' } => b.type === 'text')
-    .map((b) => b.text ?? '')
-    .join('\n');
-  return { type: 1, content: text };
 }

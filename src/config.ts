@@ -8,12 +8,6 @@ const ConfigSchema = z.object({
     botToken: z.string(),
     apiUrl: z.string().default('https://im.deepminer.com.cn/api'),
   }),
-  codebuddy: z
-    .object({
-      accessToken: z.string().optional(),
-      refreshToken: z.string().optional(),
-    })
-    .default({}),
   allowedSenders: z.array(z.string()).default([]),
 });
 
@@ -24,10 +18,6 @@ export function loadConfig(): Config {
     octo: {
       botToken: process.env.OCTO_BOT_TOKEN ?? '',
       apiUrl: process.env.OCTO_API_URL ?? 'https://im.deepminer.com.cn/api',
-    },
-    codebuddy: {
-      accessToken: process.env.CODEBUDDY_ACCESS_TOKEN,
-      refreshToken: process.env.CODEBUDDY_REFRESH_TOKEN,
     },
     allowedSenders:
       process.env.OCTO_ALLOWED_SENDERS?.split(',').filter(Boolean) ?? [],
@@ -42,14 +32,6 @@ export function loadConfig(): Config {
           ...fileConfig.octo,
           ...Object.fromEntries(
             Object.entries(envConfig.octo).filter(([, v]) => v),
-          ),
-        },
-        codebuddy: {
-          ...fileConfig.codebuddy,
-          ...Object.fromEntries(
-            Object.entries(envConfig.codebuddy).filter(
-              ([, v]) => v !== undefined,
-            ),
           ),
         },
         allowedSenders:
