@@ -1,0 +1,31 @@
+{
+  "runtime": {
+    "type": "go"
+  },
+  "init": {
+    "darwin": "go install github.com/Mininglamp-OSS/octo-cli/cmd/octo@latest",
+    "linux": "go install github.com/Mininglamp-OSS/octo-cli/cmd/octo@latest",
+    "win32": "go install github.com/Mininglamp-OSS/octo-cli/cmd/octo@latest"
+  },
+  "versionCheck": {
+    "command": {
+      "darwin": "octo version",
+      "linux": "octo version",
+      "win32": "octo.exe version"
+    },
+    "minVersion": "0.4.0"
+  },
+  "status": {
+    "darwin": "octo config show",
+    "linux": "octo config show",
+    "win32": "octo.exe config show"
+  },
+  "statusMatchJson": {
+    "ok": "true"
+  },
+  "_sync": {
+    "github": "Mininglamp-OSS/octo-cli",
+    "skillsPath": "skills",
+    "versionFile": "go.mod"
+  }
+}

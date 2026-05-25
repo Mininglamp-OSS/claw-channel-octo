@@ -18,13 +18,15 @@ interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => v
  *     }
  *   }
  * }
+ *
+ * Also accepts `apiBaseUrl` / `api_base_url` to align with octo-cli naming.
  */
 export class OctoConfigResolver {
   constructor(private logger: Logger) {}
 
   resolveAccount(raw: Record<string, unknown>): PluginAccount {
     const botToken = String(raw.botToken ?? raw.bot_token ?? '');
-    const apiUrl = String(raw.apiUrl ?? raw.api_url ?? 'https://im.deepminer.com.cn/api');
+    const apiUrl = String(raw.apiUrl ?? raw.apiBaseUrl ?? raw.api_url ?? raw.api_base_url ?? 'https://im.deepminer.com.cn/api');
     const connectionMode = String(raw.connectionMode ?? raw.connection_mode ?? 'websocket');
 
     if (!botToken) {

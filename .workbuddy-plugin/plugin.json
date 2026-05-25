@@ -1,0 +1,33 @@
+{
+  "name": "octo-claw-channel",
+  "version": "0.2.0",
+  "description": "Octo IM channel plugin for WorkBuddy Claw",
+  "mcpServers": {
+    "octo": {
+      "command": "node",
+      "args": ["${CODEBUDDY_PLUGIN_ROOT}/dist/index.js"],
+      "env": {
+        "OCTO_BOT_TOKEN": "${user_config.OCTO_BOT_TOKEN}",
+        "OCTO_API_BASE_URL": "${user_config.OCTO_API_BASE_URL}"
+      }
+    }
+  },
+  "userConfig": {
+    "OCTO_BOT_TOKEN": {
+      "description": "Octo Bot Token (from BotFather)",
+      "sensitive": true
+    },
+    "OCTO_API_BASE_URL": {
+      "description": "Octo API base URL",
+      "sensitive": false,
+      "default": "https://im.deepminer.com.cn/api"
+    }
+  },
+  "skills": [
+    "./connector/skills/octo-shared",
+    "./connector/skills/octo-messaging",
+    "./connector/skills/octo-files",
+    "./connector/skills/octo-matter"
+  ],
+  "connector": "./connector/cli.json"
+}
