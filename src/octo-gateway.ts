@@ -44,11 +44,16 @@ export class OctoGateway extends EventEmitter {
   private reconnectAttempt = 0;
   private seenMessageIds = new Map<string, number>();
 
-  constructor(private logger: Logger) { super(); }
+  constructor(
+    private logger: Logger,
+    private onAccountResolved?: (account: PluginAccount) => void,
+  ) { super(); }
 
   getConnectionState(): ConnectionState { return this.state; }
 
   async start(account: PluginAccount): Promise<void> {
+    // Notify listeners (e.g. outbound credential injection) before connecting
+    this.onAccountResolved?.(account);
     const { botToken, apiUrl } = account.credential as { botToken: string; apiUrl: string };
     this.botToken = botToken;
     this.apiUrl = apiUrl;
