@@ -1,54 +1,47 @@
 # claw-channel-octo
 
-Centrifugo bridge connecting **Octo IM** to **WorkBuddy desktop** via the Claw protocol.
-
-Octo users `@Bot` → WorkBuddy desktop Agent executes the task → result is delivered back to Octo.
+Octo IM channel plugin for WorkBuddy Claw. Same architecture as WecomAiBotPlugin — direct WebSocket + ClawPluginHost.
 
 ## Architecture
 
 ```
-Octo user @Bot
-  ↓ WuKongIM WebSocket
-claw-channel-octo (this bridge)
-  ↓ AGP session.prompt over Centrifugo (copilot.tencent.com)
-WorkBuddy desktop CentrifugoMessageHandler
-  ↓ ClawPluginHost → Agent
-  ↓ session.promptResponse over Centrifugo
-claw-channel-octo
-  ↓ Octo REST API sendMessage
-Octo user receives reply
+Octo User → WuKongIM → OctoGateway → ClawPluginHost → Agent → OctoOutbound → Octo REST API → User
 ```
 
-See [DESIGN.md](./DESIGN.md) for the full technical design.
+## Install
 
-## Status
-
-Phase 1 MVP — text messages, single-user OAuth, basic session isolation. WuKongIM
-binary protocol implementation is stubbed; see TODOs in `src/octo/ws-client.ts`.
+Designed for integration into WorkBuddy desktop at `src/main/app/claw/plugins/octo/`.
 
 ## Configuration
 
-Either environment variables or `~/.claw-channel-octo/config.json`:
+In `~/.workbuddy/settings.json`:
 
-| Var | Description |
-| --- | --- |
-| `OCTO_BOT_TOKEN` | Octo bot token (required) |
-| `OCTO_API_URL` | Octo REST base URL (default `https://im.deepminer.com.cn/api`) |
-| `CODEBUDDY_API_URL` | CodeBuddy/Centrifugo broker base URL (default `https://copilot.tencent.com`) |
-| `CODEBUDDY_ACCESS_TOKEN` | Pre-provisioned CodeBuddy access token (skips OAuth) |
-| `CODEBUDDY_REFRESH_TOKEN` | Pre-provisioned CodeBuddy refresh token |
-| `CLAW_ALLOWED_SENDERS` | Comma-separated allowlist of Octo user UIDs |
+```json
+{
+  "claw": {
+    "channels": {
+      "octo": {
+        "enabled": true,
+        "botToken": "your-bot-token",
+        "apiUrl": "https://im.deepminer.com.cn/api",
+        "connectionMode": "websocket"
+      }
+    }
+  }
+}
+```
 
-Credentials persist to `~/.claw-channel-octo/credentials.json` (chmod 600).
-
-## Build
+## Development
 
 ```bash
 npm install
+npm run type-check
+npm test
 npm run build
-npm start
 ```
 
-## License
+## Docs
 
-UNLICENSED — internal use.
+- [DESIGN.md](./DESIGN.md) — Architecture overview
+- [REVIEW.md](./REVIEW.md) — Code review findings
+- [OCTO-BOT-SDK-FOR-WORKBUDDY.md](./OCTO-BOT-SDK-FOR-WORKBUDDY.md) — Octo Bot API reference

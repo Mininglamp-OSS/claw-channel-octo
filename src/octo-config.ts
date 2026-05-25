@@ -1,6 +1,6 @@
 import type { PluginAccount } from './index.js';
 
-interface Logger { info: (...a: any[]) => void; warn: (...a: any[]) => void; error: (...a: any[]) => void; }
+interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void; }
 
 /**
  * Resolves Octo plugin account from settings.json config.

@@ -7,7 +7,7 @@ import { OctoOutbound } from './octo-outbound.js';
 import { OctoConfigResolver } from './octo-config.js';
 
 export interface PluginContext {
-  logger: { info: (...args: any[]) => void; warn: (...args: any[]) => void; error: (...args: any[]) => void };
+  logger: { info: (...args: unknown[]) => void; warn: (...args: unknown[]) => void; error: (...args: unknown[]) => void };
   hostConfig?: Record<string, unknown>;
 }
 
