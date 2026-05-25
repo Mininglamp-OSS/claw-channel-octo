@@ -318,19 +318,7 @@ class OctoOutbound {
  ];
 ```
 
-### ORIGIN_TO_PLUGIN 变更
-
-```diff
- var ORIGIN_TO_PLUGIN = {
-   "wecomaibotproxy": "wecomaibot",
-   "wechatmpproxy": "wechatmp",
-   "wechatkfproxy": "wechatkf",
-   "custom": "custom",
-   "customproxy": "custom",
-+  "octoproxy": "octo",
-+  "octo": "octo",
- };
-```
+注：ORIGIN_TO_PLUGIN 不需要改动。Octo 走 websocket 直连模式（和企微相同），消息通过 plugin gateway 直接 emitInbound，不经 CentrifugoMessageHandler 的 origin 路由。
 
 ## 11. 联系方式
 
