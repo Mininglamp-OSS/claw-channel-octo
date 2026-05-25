@@ -53,10 +53,6 @@ WorkBuddy 侧所需变更：
    "wechatmp"
  ];
 
- // ORIGIN_TO_PLUGIN mapping
-+  "octoproxy": "octo",
-+  "octo": "octo",
-
  // Plugin registration
 + import { createOctoPlugin } from './plugins/octo/index.js';
 + pluginHost.registerPlugin(createOctoPlugin);

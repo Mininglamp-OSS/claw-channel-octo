@@ -39,7 +39,6 @@ This plugin is designed to be integrated into WorkBuddy desktop app at `src/main
 
 Required changes in WorkBuddy:
 - Add `"octo"` to `CLAW_CHANNEL_TYPES` array
-- Add `"octo": "octo"` and `"octoproxy": "octo"` to `ORIGIN_TO_PLUGIN`
 - Register plugin: `pluginHost.registerPlugin(createOctoPlugin)`
 - Add Octo configuration card in Claw Settings UI
 
