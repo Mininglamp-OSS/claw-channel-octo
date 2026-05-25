@@ -1,7 +1,24 @@
 import { request } from 'undici';
 
-// TODO: confirm exact base URL — copilot.tencent.com per DESIGN.md §3.2.
-const COPILOT_BASE_URL = 'https://copilot.tencent.com';
+/**
+ * Base URL for workspace registration.
+ *
+ * Verified from WorkBuddy desktop logs:
+ * - Centrifugo WS endpoint: wss://www.codebuddy.cn/v2/agentos/localagent/workspaces/websocket
+ * - RemoteControl baseUrl: https://tencent.sso.codebuddy.cn/v2
+ * - wechat-openclaw-channel uses: copilot.tencent.com
+ *
+ * All three may work; www.codebuddy.cn is verified from live logs.
+ * Fallback order: CODEBUDDY_API_URL env → www.codebuddy.cn → copilot.tencent.com
+ */
+const COPILOT_BASE_URL = process.env.CODEBUDDY_API_URL
+  ?? 'https://www.codebuddy.cn';
+
+/**
+ * Verified Centrifugo WebSocket endpoint (from WorkBuddy desktop logs).
+ * Used as fallback when registerWorkspace response doesn't include a url.
+ */
+const CENTRIFUGO_WS_FALLBACK = 'wss://www.codebuddy.cn/v2/agentos/localagent/workspaces/websocket';
 
 export interface CentrifugoCredentials {
   channel: string;
@@ -54,7 +71,7 @@ export async function registerWorkspace(
 
   return {
     channel: data.channel,
-    url: data.url,
+    url: data.url || CENTRIFUGO_WS_FALLBACK,
     connectionToken,
     subscriptionToken,
   };

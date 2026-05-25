@@ -1,8 +1,17 @@
 import { request } from 'undici';
 
-// CodeBuddy OAuth against copilot.tencent.com.
-// TODO: confirm exact endpoint paths against wechat-openclaw-channel source.
-const OAUTH_BASE_URL = 'https://copilot.tencent.com';
+/**
+ * CodeBuddy OAuth endpoints.
+ *
+ * Verified from WorkBuddy desktop logs:
+ * - Login URL: copilot.tencent.com/login?platform=workbuddy
+ * - API base may be www.codebuddy.cn or copilot.tencent.com
+ *
+ * The OAuth flow uses copilot.tencent.com for login but the actual
+ * API calls may go to www.codebuddy.cn. Configurable via env.
+ */
+const OAUTH_BASE_URL = process.env.CODEBUDDY_OAUTH_URL
+  ?? 'https://copilot.tencent.com';
 
 export interface AuthState {
   authUrl: string;
