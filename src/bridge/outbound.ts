@@ -54,7 +54,7 @@ export class OutboundBridge {
    * Only sends once per chatId to avoid spamming.
    */
   private async handleSessionUpdate(payload: SessionUpdatePayload): Promise<void> {
-    const chatId = (payload as Record<string, unknown>).chatId as string | undefined;
+    const chatId = (payload as unknown as Record<string, unknown>).chatId as string | undefined;
     if (!chatId) return;
 
     // Only send typing once per chatId per session
@@ -79,7 +79,7 @@ export class OutboundBridge {
    * Handle session.promptResponse — convert AGP response to Octo message and send.
    */
   private async handlePromptResponse(payload: SessionPromptResponsePayload): Promise<void> {
-    const chatId = (payload as Record<string, unknown>).chatId as string | undefined;
+    const chatId = (payload as unknown as Record<string, unknown>).chatId as string | undefined;
     if (!chatId) {
       this.logger.warn('[OutboundBridge] promptResponse missing chatId, cannot route reply');
       return;
@@ -108,7 +108,10 @@ export class OutboundBridge {
     }
 
     try {
-      await this.octoApi.sendMessage(target.channelId, target.channelType, octoPayload);
+      await this.octoApi.sendMessage(target.channelId, target.channelType, {
+        type: octoPayload.type,
+        content: octoPayload.content ?? '',
+      });
       this.logger.info(
         `[OutboundBridge] Sent reply to ${target.channelId} (type=${target.channelType}), len=${octoPayload.content.length}`,
       );

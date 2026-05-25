@@ -96,7 +96,7 @@ export function parseReplyTarget(chatId: string): ReplyTarget | null {
   if (raw.startsWith('group:')) {
     // group:{groupId}:{userId} — reply goes to the group, not the user
     const parts = raw.slice(6).split(':');
-    return { channelId: parts[0], channelType: CHANNEL_TYPE_GROUP };
+    return { channelId: parts[0] ?? '', channelType: CHANNEL_TYPE_GROUP };
   }
 
   return null;
@@ -126,8 +126,9 @@ export class MessageDedup {
    * Returns true if it's a duplicate (already seen).
    */
   isDuplicate(msgId: string): boolean {
-    if (this.seen.has(msgId)) return true;
-    this.seen.set(msgId, Date.now());
+    const key = String(msgId);
+    if (this.seen.has(key)) return true;
+    this.seen.set(key, Date.now());
     return false;
   }
 

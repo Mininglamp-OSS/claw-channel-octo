@@ -37,7 +37,7 @@ export class CentrifugeClient {
     });
     this.client.on('error', (ctx) => {
       this.logger.error('centrifuge: error', {
-        type: ctx.error.type,
+        type: (ctx.error as any).type,
         message: ctx.error.message,
       });
     });
