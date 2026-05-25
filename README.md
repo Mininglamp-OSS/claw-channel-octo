@@ -2,26 +2,22 @@
 
 WorkBuddy Claw 内置渠道插件 — 让 Octo IM 成为 WorkBuddy 的远程控制通道，与企微 / 飞书 / 钉钉同级。
 
-## Overview
-
-claw-channel-octo 实现了 WorkBuddy ClawPluginHost 标准插件接口，将 Octo IM 接入 WorkBuddy 桌面端的 Claw 远程控制系统。用户在 Octo 中 @Bot 发送指令，WorkBuddy 桌面端 Agent 自主执行任务并回传结果。
-
 ## Architecture
+
+**双系统设计：**
+
+- **OctoGateway**（常驻耳朵）— WuKongIM WebSocket 连接，实时接收 Octo 消息 → emitInbound → Agent 处理
+- **octo-cli**（Agent 的手）— AI 通过 `exec` 调用 `octo message send`、`octo group list` 等命令主动操作 Octo
 
 ```
 Octo 用户 @Bot
-    ↓ WuKongIM WebSocket（事件轮询 MVP / Binary WS Phase 2）
-OctoGateway
+    ↓ WuKongIM WebSocket
+OctoGateway (event polling MVP / Binary WS Phase 2)
     ↓ emit('inbound', InboundMessage)
-ClawPluginHost.emitInbound('octo', message)
+ClawPluginHost → ClawService → ClawRuntime → Agent
     ↓
-ClawService → ClawRuntime → CodeBuddy Agent 处理
-    ↓
-ClawPluginHost.sendOutbound('octo', response)
-    ↓
-OctoOutbound.send(message)
-    ↓ Octo REST API sendMessage
-Octo 用户收到回复
+Agent 需要回复 → OctoOutbound.send() → Octo REST API
+Agent 需要主动操作 → exec octo-cli commands (Skills)
 ```
 
 **connectionMode: `"websocket"`** — 回复直走 `plugin.outbound`，不经 `copilot.tencent.com` webhook 中继。
@@ -34,7 +30,19 @@ Octo 用户收到回复
 - 自动心跳保活（30s 间隔）
 - 事件轮询自动重连（指数退避，最大 60s）
 - 消息去重（5 分钟 TTL 缓存）
-- 流式回复支持（Phase 2）
+
+## octo-cli Integration
+
+Agent 的主动操作能力由 [octo-cli](https://github.com/Mininglamp-OSS/octo-cli) 提供：
+
+- 7 个域（matter / group / thread / bot / message / file / event），48 个操作
+- 4 个 Agent Skills：`octo-shared`、`octo-messaging`、`octo-files`、`octo-matter`
+- 凭证通过 `$OCTO_BOT_TOKEN` + `$OCTO_API_BASE_URL` 环境变量共享（plugin.json userConfig 自动注入）
+
+安装：
+```bash
+go install github.com/Mininglamp-OSS/octo-cli/cmd/octo@latest
+```
 
 ## Integration
 
@@ -43,7 +51,6 @@ Octo 用户收到回复
 WorkBuddy 侧所需变更：
 
 ```diff
- // claw-types.ts
  var CLAW_CHANNEL_TYPES = [
    "feishu", "wecomaibot", "qq", "dingtalk",
    "yuanbao", "weixinClawBot", "wecomIOA",
@@ -54,7 +61,7 @@ WorkBuddy 侧所需变更：
  ];
 
  // Plugin registration
-+ import { createOctoPlugin } from './plugins/octo/index.js';
++ import { createOctoPlugin } from 'claw-channel-octo';
 + pluginHost.registerPlugin(createOctoPlugin);
 ```
 
@@ -82,7 +89,9 @@ WorkBuddy 侧所需变更：
 | `enabled` | boolean | ✅ | 是否启用 Octo 渠道 |
 | `botToken` | string | ✅ | Octo Bot 鉴权 Token（通过 BotFather 创建） |
 | `apiUrl` | string | ✅ | Octo API 基础地址 |
-| `connectionMode` | string | — | 固定 `"websocket"`，确保回复走 plugin outbound |
+| `connectionMode` | string | — | 固定 `"websocket"` |
+
+凭证由 plugin.json userConfig 管理，`OCTO_BOT_TOKEN` 存系统密钥链，自动注入到 MCP Server + octo-cli 环境。
 
 ## Modules
 
@@ -94,36 +103,27 @@ WorkBuddy 侧所需变更：
 | `src/octo-outbound.ts` | `OctoOutbound` — sendMessage / typing 回复适配器 |
 | `src/octo-types.ts` | Channel / Message 类型常量 + Thread channel_id 解析 |
 
-## Octo Bot API
-
-完整的 Octo Bot API 文档见 [OCTO-BOT-SDK-FOR-WORKBUDDY.md](./OCTO-BOT-SDK-FOR-WORKBUDDY.md)，覆盖：
-
-- Bot 注册与鉴权
-- WuKongIM WebSocket 协议
-- REST API（消息 / 群管理 / Thread / 文件上传）
-- DM / Group / Thread 消息路由规则
-
 ## Development
 
 ```bash
-# 安装依赖
 npm install
-
-# 类型检查
 npm run type-check
-
-# 运行测试
 npm test
-
-# 构建
 npm run build
 ```
+
+## Docs
+
+- [DESIGN.md](./DESIGN.md) — Architecture overview + credential flow
+- [OCTO-BOT-SDK-FOR-WORKBUDDY.md](./OCTO-BOT-SDK-FOR-WORKBUDDY.md) — Octo Bot API reference
+- [CONTRIBUTING.md](./CONTRIBUTING.md) — How to contribute
 
 ## Roadmap
 
 - [x] Phase 1 — 事件轮询 MVP + 文本消息收发 + 心跳 + 重连 + 去重
-- [ ] Phase 2 — WuKongIM Binary WebSocket 实时连接（降低 2s 轮询延迟）
-- [ ] Phase 2 — 流式回复（streaming deliveryMode 累积 chunks）
+- [x] octo-cli 集成 — Agent Skills + connector descriptor + userConfig 凭证注入
+- [ ] Phase 2 — WuKongIM Binary WebSocket 实时连接
+- [ ] Phase 2 — 流式回复（streaming deliveryMode）
 - [ ] Phase 2 — 图片 / 文件上传发送
 - [ ] Phase 3 — WorkBuddy Claw 设置面板 UI 集成
 

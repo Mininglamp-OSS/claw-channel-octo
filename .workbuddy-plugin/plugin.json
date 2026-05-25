@@ -5,7 +5,9 @@
   "mcpServers": {
     "octo": {
       "command": "node",
-      "args": ["${CODEBUDDY_PLUGIN_ROOT}/dist/index.js"],
+      "args": [
+        "${CODEBUDDY_PLUGIN_ROOT}/dist/index.js"
+      ],
       "env": {
         "OCTO_BOT_TOKEN": "${user_config.OCTO_BOT_TOKEN}",
         "OCTO_API_BASE_URL": "${user_config.OCTO_API_BASE_URL}"
@@ -23,11 +25,6 @@
       "default": "https://im.deepminer.com.cn/api"
     }
   },
-  "skills": [
-    "./connector/skills/octo-shared",
-    "./connector/skills/octo-messaging",
-    "./connector/skills/octo-files",
-    "./connector/skills/octo-matter"
-  ],
-  "connector": "./connector/cli.json"
+  "connector": "./connector/cli.json",
+  "_skills_note": "Skills are provided by octo-cli (github.com/Mininglamp-OSS/octo-cli/skills/). Install octo-cli to get octo-shared, octo-messaging, octo-files, octo-matter skills."
 }

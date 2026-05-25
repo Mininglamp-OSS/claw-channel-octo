@@ -24,6 +24,10 @@ export class OctoOutbound {
   }
 
   async send(message: OutboundMessage): Promise<SendResult> {
+    if (!this.apiUrl || !this.botToken) {
+      return { success: false, error: 'Outbound not configured — call configure() first' };
+    }
+
     const chatId = String(message.replyContext.chatId ?? '');
     const channelType = Number(message.replyContext.channelType ?? 1);
     const text = message.text ?? '';
