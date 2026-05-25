@@ -79,6 +79,14 @@ export function createOctoPlugin(ctx: PluginContext): ClawPlugin {
   const gateway = new OctoGateway(logger);
   const outbound = new OctoOutbound(logger);
 
+  // Wire credential sharing: when gateway starts, configure outbound with same credentials
+  const origStart = gateway.start.bind(gateway);
+  gateway.start = async (account: PluginAccount) => {
+    const { botToken, apiUrl } = account.credential as { botToken: string; apiUrl: string };
+    outbound.configure(apiUrl, botToken);
+    return origStart(account);
+  };
+
   return {
     id: 'octo',
     meta: {

@@ -10,5 +10,4 @@ export default defineConfig({
   clean: true,
   splitting: false,
   shims: false,
-  banner: { js: "#!/usr/bin/env node" },
 });
