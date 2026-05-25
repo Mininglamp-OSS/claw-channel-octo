@@ -54,7 +54,11 @@ export class OctoGateway extends EventEmitter {
   async start(account: PluginAccount): Promise<void> {
     // Notify listeners (e.g. outbound credential injection) before connecting
     this.onAccountResolved?.(account);
-    const { botToken, apiUrl } = account.credential as { botToken: string; apiUrl: string };
+    const botToken = typeof account.credential.botToken === 'string' ? account.credential.botToken : '';
+    const apiUrl = typeof account.credential.apiUrl === 'string' ? account.credential.apiUrl : '';
+    if (!botToken || !apiUrl) {
+      throw new Error('[OctoGateway] credential.botToken and credential.apiUrl must be non-empty strings');
+    }
     this.botToken = botToken;
     this.apiUrl = apiUrl;
     this.account = account;
@@ -143,10 +147,11 @@ export class OctoGateway extends EventEmitter {
 
           // Ack event
           try {
-            await request(`${this.apiUrl}/v1/bot/events/${event.event_id}/ack`, {
+            const ackRes = await request(`${this.apiUrl}/v1/bot/events/${event.event_id}/ack`, {
               method: 'POST',
               headers: { Authorization: `Bearer ${this.botToken}` },
             });
+            await ackRes.body.dump();
           } catch { /* best-effort */ }
         }
       } catch (err) {
@@ -190,11 +195,12 @@ export class OctoGateway extends EventEmitter {
   private startHeartbeat(): void {
     this.heartbeatTimer = setInterval(async () => {
       try {
-        await request(`${this.apiUrl}/v1/bot/heartbeat`, {
+        const res = await request(`${this.apiUrl}/v1/bot/heartbeat`, {
           method: 'POST',
           headers: { Authorization: `Bearer ${this.botToken}`, 'Content-Type': 'application/json' },
           body: '{}',
         });
+        await res.body.dump();
       } catch { /* best-effort */ }
     }, 30_000);
   }

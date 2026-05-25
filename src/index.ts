@@ -118,8 +118,11 @@ export function createOctoPlugin(ctx: PluginContext): ClawPlugin {
   const config = new OctoConfigResolver(logger);
   const outbound = new OctoOutbound(logger);
   const gateway = new OctoGateway(logger, (account) => {
-    const { botToken, apiUrl } = account.credential as { botToken: string; apiUrl: string };
-    outbound.configure(apiUrl, botToken);
+    const botToken = typeof account.credential.botToken === 'string' ? account.credential.botToken : '';
+    const apiUrl = typeof account.credential.apiUrl === 'string' ? account.credential.apiUrl : '';
+    if (botToken && apiUrl) {
+      outbound.configure(apiUrl, botToken);
+    }
   });
 
   return {

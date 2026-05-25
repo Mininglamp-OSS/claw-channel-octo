@@ -75,11 +75,12 @@ export class OctoOutbound {
 
   private async sendTyping(channelId: string, channelType: number): Promise<void> {
     try {
-      await request(`${this.apiUrl}/v1/bot/typing`, {
+      const res = await request(`${this.apiUrl}/v1/bot/typing`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.botToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ channel_id: channelId, channel_type: channelType }),
       });
+      await res.body.dump();
     } catch { /* best-effort */ }
   }
 }
