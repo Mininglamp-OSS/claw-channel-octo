@@ -88,8 +88,10 @@ export class OctoOutbound {
         return { success: true };
       }
 
-      // --- Handle exec_approval metadata — send immediately regardless of mode ---
+      // --- Handle exec_approval metadata — text-only confirmation, sent immediately ---
       if (message.metadata?.state?.startsWith('exec_approval')) {
+        const key = this.trackingKey(message.replyContext);
+        if (key) this.thinkingStreams.delete(key); // clear any pending thinking placeholder
         if (text) await this.sendMessage(chatId, channelType, { type: 1, content: text });
         return { success: true };
       }

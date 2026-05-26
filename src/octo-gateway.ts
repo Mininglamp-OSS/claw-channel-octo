@@ -102,7 +102,6 @@ export class OctoGateway {
 
       this.startHeartbeat();
       this.startDedupCleanup();
-      this.setState({ status: 'connected' });
       this.logger.info('[OctoGateway] Connected (websocket)');
     } catch (err) {
       if (this.ws) {
@@ -162,24 +161,32 @@ export class OctoGateway {
     const content: ContentItem[] = this.parsePayload(msg.payload);
 
     // Determine group info
-    const isGroup = channelType === OCTO_CHANNEL_TYPE.GROUP || channelType === 5;
+    const isGroup = channelType === OCTO_CHANNEL_TYPE.GROUP || channelType === OCTO_CHANNEL_TYPE.THREAD;
     let group: InboundMessage['group'];
     if (isGroup) {
       // For threads, extract parent group ID
-      const groupId = (channelType === 5 && isThreadChannelId(chatId))
+      const groupId = (channelType === OCTO_CHANNEL_TYPE.THREAD && isThreadChannelId(chatId))
         ? parseThreadChannelId(chatId)!.groupNo
         : chatId;
-      const chatType = channelType === 5 ? 'thread' as const : 'group' as const;
+      const chatType = channelType === OCTO_CHANNEL_TYPE.THREAD ? 'thread' as const : 'group' as const;
       group = { groupId, chatType };
     }
 
-    // Detect @bot mention — check Octo rich text format @[uid:name] and plain @name
+    // Detect @bot mention — structured @[uid:name] is authoritative;
+    // plain @name uses word-boundary regex to avoid false positives.
+    // @所有人 (broadcast) is treated as a mention — product decision: bot should
+    // respond to group broadcasts so users can summon it without knowing the name.
     const textContent = msg.payload.content ?? '';
     let botMentioned: boolean | undefined;
     if (isGroup) {
-      botMentioned = textContent.includes(`@[${this.botUid}:`)
-        || (this.botName !== '' && textContent.includes(`@${this.botName}`))
-        || textContent.includes('@所有人');
+      const structuredMention = textContent.includes(`@[${this.botUid}:`);
+      const broadcastMention = textContent.includes('@所有人');
+      let plainNameMention = false;
+      if (!structuredMention && this.botName !== '') {
+        const escaped = this.botName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        plainNameMention = new RegExp(`@${escaped}(?![\\p{L}\\p{N}_])`, 'u').test(textContent);
+      }
+      botMentioned = structuredMention || plainNameMention || broadcastMention;
     }
 
     const inbound: InboundMessage = {
@@ -205,11 +212,11 @@ export class OctoGateway {
       case OCTO_MESSAGE_TYPE.TEXT:
         return [{ type: 'text', text: payload.content ?? '' }];
       case OCTO_MESSAGE_TYPE.IMAGE:
-      case 3: // GIF
-        return [{ type: 'image', url: payload.url, mimeType: payload.type === 3 ? 'image/gif' : undefined }];
-      case 4: // Voice
+      case OCTO_MESSAGE_TYPE.GIF:
+        return [{ type: 'image', url: payload.url, ...(payload.type === OCTO_MESSAGE_TYPE.GIF ? { mimeType: 'image/gif' } : {}) }];
+      case OCTO_MESSAGE_TYPE.VOICE:
         return [{ type: 'file', url: payload.url, name: 'voice', mimeType: 'audio/mpeg' }];
-      case 5: // Video
+      case OCTO_MESSAGE_TYPE.VIDEO:
         return [{ type: 'file', url: payload.url, name: payload.name ?? 'video', mimeType: 'video/mp4' }];
       case OCTO_MESSAGE_TYPE.FILE:
         return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];

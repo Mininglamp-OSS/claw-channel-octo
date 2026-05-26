@@ -470,3 +470,107 @@ describe('WS Lifecycle Edge Cases', () => {
     assert.equal(plugin.gateway.getConnectionState().status, 'error');
   });
 });
+
+describe('Outbound Delivery Modes', () => {
+  let server: MockOctoServer;
+
+  before(async () => { server = await startMockOctoServer(); });
+  after(async () => { await server.stop(); });
+  beforeEach(() => { server.reset(); });
+
+  const logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  it('ack sends thinking placeholder, final edits it', async () => {
+    const plugin = createOctoPlugin({ logger });
+    const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+    await plugin.gateway.startAccount(account);
+
+    // Send ack
+    const ackResult = await plugin.outbound.send({
+      deliveryMode: 'ack',
+      replyContext: { chatId: 'u1', channelType: '1', requestId: 'req-1' },
+    });
+    assert.equal(ackResult.success, true);
+    const ackReq = server.requests.find(r => r.path === '/v1/bot/sendMessage');
+    assert.ok(ackReq);
+    assert.deepEqual((ackReq!.body as Record<string, unknown>).payload, { type: 1, content: '…' });
+
+    // Send final — should edit the thinking message
+    server.requests.length = 0;
+    const finalResult = await plugin.outbound.send({
+      text: 'final answer',
+      deliveryMode: 'final',
+      replyContext: { chatId: 'u1', channelType: '1', requestId: 'req-1' },
+    });
+    assert.equal(finalResult.success, true);
+    const editReq = server.requests.find(r => r.path === '/v1/bot/message/edit');
+    assert.ok(editReq);
+    assert.equal((editReq!.body as Record<string, unknown>).message_id, 'mock_msg_001');
+
+    await plugin.gateway.stopAccount();
+  });
+
+  it('exec_approval sends text immediately and clears thinkingStreams', async () => {
+    const plugin = createOctoPlugin({ logger });
+    const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+    await plugin.gateway.startAccount(account);
+
+    const result = await plugin.outbound.send({
+      text: 'Allow exec?',
+      metadata: { state: 'exec_approval_pending' },
+      replyContext: { chatId: 'u1', channelType: '1', requestId: 'req-2' },
+    });
+    assert.equal(result.success, true);
+    const sendReq = server.requests.find(r => r.path === '/v1/bot/sendMessage');
+    assert.ok(sendReq);
+    assert.deepEqual((sendReq!.body as Record<string, unknown>).payload, { type: 1, content: 'Allow exec?' });
+
+    await plugin.gateway.stopAccount();
+  });
+
+  it('botMentioned is true for structured @[uid:name] in group', async () => {
+    const plugin = createOctoPlugin({ logger });
+    const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+    await plugin.gateway.startAccount(account);
+
+    let received: InboundMessage | undefined;
+    plugin.gateway.onInboundMessage = (msg) => { received = msg; };
+
+    server.injectMessage({
+      messageId: 'mention_001',
+      fromUid: 'user_1',
+      channelId: 'group_abc',
+      channelType: 2,
+      payload: { type: 1, content: '@[test_bot:WorkBuddy Bot] help me' },
+    });
+    await sleep(50);
+    assert.ok(received);const msg = received as InboundMessage;
+    assert.equal(msg.botMentioned, true);
+    assert.equal(msg.group?.chatType, 'group');
+    assert.equal(msg.group?.groupId, 'group_abc');
+
+    await plugin.gateway.stopAccount();
+  });
+
+  it('botMentioned is false for unrelated @name in group', async () => {
+    const plugin = createOctoPlugin({ logger });
+    const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+    await plugin.gateway.startAccount(account);
+
+    let received: InboundMessage | undefined;
+    plugin.gateway.onInboundMessage = (msg) => { received = msg; };
+
+    server.injectMessage({
+      messageId: 'nomention_001',
+      fromUid: 'user_1',
+      channelId: 'group_abc',
+      channelType: 2,
+      payload: { type: 1, content: '@SomeOtherUser hey' },
+    });
+    await sleep(50);
+    assert.ok(received);const msg = received as InboundMessage;
+    assert.equal(msg.botMentioned, false);
+
+    await plugin.gateway.stopAccount();
+  });
+});
