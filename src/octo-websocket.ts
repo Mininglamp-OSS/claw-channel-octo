@@ -53,7 +53,7 @@ const DEVICE_FLAG_WEB = 2;
  *   connect(wsUrl, uid, token) → WebSocket open → JSON-RPC `connect` →
  *   ConnectResult{ reasonCode: 0 } → start ping loop → ready.
  *
- * Inbound `recv` notifications are decoded (base64 payload → JSON) and
+ * Inbound `recv` notifications are emitted via the 'message' event.
  * emitted via the 'message' event. Each is auto-acked with `recvack`.
  *
  * On unexpected disconnect, the client auto-reconnects with exponential
@@ -256,21 +256,10 @@ export class OctoWebSocket extends EventEmitter {
     const fromUid = String(params.fromUid ?? '');
     const timestamp = typeof params.timestamp === 'number' ? params.timestamp : undefined;
 
-    // WuKongIM JSON-RPC protocol: payload is a direct JSON object, not base64
-    let payload: OctoWsMessage['payload'];
-    if (typeof params.payload === 'object' && params.payload !== null) {
-      payload = params.payload as OctoWsMessage['payload'];
-    } else if (typeof params.payload === 'string') {
-      // Legacy/compat: some older versions may send base64-encoded JSON
-      try {
-        const decoded = Buffer.from(params.payload, 'base64').toString('utf-8');
-        payload = JSON.parse(decoded) as OctoWsMessage['payload'];
-      } catch {
-        payload = { type: 1, content: params.payload };
-      }
-    } else {
-      payload = { type: 0 };
-    }
+    // WuKongIM JSON-RPC protocol: payload is a direct JSON object
+    const payload = (typeof params.payload === 'object' && params.payload !== null)
+      ? params.payload as OctoWsMessage['payload']
+      : { type: 0 };
 
     const msg: OctoWsMessage = { messageId, messageSeq, channelId, channelType, fromUid, timestamp, payload };
     this.emit('message', msg);
