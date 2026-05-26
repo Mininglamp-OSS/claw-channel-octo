@@ -1,5 +1,5 @@
 /**
- * Octo channel types (from WuKongIM protocol)
+ * Octo channel and message type constants
  */
 export const OCTO_CHANNEL_TYPE = {
   DM: 1,

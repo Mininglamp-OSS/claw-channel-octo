@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { request } from 'undici';
 import type { ConnectionState, PluginAccount, InboundMessage, ContentItem } from './index.js';
 import { OCTO_CHANNEL_TYPE, OCTO_MESSAGE_TYPE } from './octo-types.js';
+import { OctoWebSocket, type OctoWsMessage } from './octo-websocket.js';
 
 interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void; }
 
@@ -22,10 +23,13 @@ const RECONNECT_BACKOFF_MAX_MS = 60_000;
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 
 /**
- * OctoGateway manages the WebSocket connection to Octo (WuKongIM protocol).
+ * OctoGateway manages the real-time connection to Octo.
  *
- * Phase 1 uses HTTP event polling as MVP. Full WuKongIM binary WebSocket
- * protocol implementation is Phase 2.
+ * Preferred transport is JSON-RPC over WebSocket (OctoWebSocket). If the
+ * WebSocket handshake fails — bad URL, network policy, server-side issue —
+ * the gateway falls back to HTTP event polling so messages still flow.
+ * Heartbeat is kept on REST regardless, since bot online status is tracked
+ * server-side via /v1/bot/heartbeat.
  *
  * Emits 'inbound' event with InboundMessage when a message arrives.
  */
@@ -43,6 +47,8 @@ export class OctoGateway extends EventEmitter {
   private consecutivePollFailures = 0;
   private reconnectAttempt = 0;
   private seenMessageIds = new Map<string, number>();
+  private ws: OctoWebSocket | null = null;
+  private wsActive = false;
 
   constructor(
     private logger: Logger,
@@ -82,16 +88,30 @@ export class OctoGateway extends EventEmitter {
 
       this.logger.info(`[OctoGateway] Bot registered: ${regData.robot_id}`);
 
-      // TODO Phase 2: Use regData.ws_url + regData.im_token for full WuKongIM WebSocket
-      // For now, use HTTP event polling
       this.consecutivePollFailures = 0;
       this.reconnectAttempt = 0;
-      this.startPolling();
+
+      // Always keep REST heartbeat + dedup timer running
       this.startHeartbeat();
       this.startDedupCleanup();
 
+      // Prefer WebSocket if the register response gave us a ws_url + im_token.
+      // Fall back to HTTP polling on any failure so messages still flow.
+      const wsUrl = typeof regData.ws_url === 'string' ? regData.ws_url : '';
+      const imToken = typeof regData.im_token === 'string' ? regData.im_token : '';
+      const robotId = typeof regData.robot_id === 'string' ? regData.robot_id : '';
+      let wsOk = false;
+      if (wsUrl && imToken && robotId) {
+        wsOk = await this.tryStartWebSocket(wsUrl, robotId, imToken);
+      }
+      if (!wsOk) {
+        this.startPolling();
+        this.logger.info('[OctoGateway] Connected (polling mode)');
+      } else {
+        this.logger.info('[OctoGateway] Connected (websocket mode)');
+      }
+
       this.state = { status: 'connected' };
-      this.logger.info('[OctoGateway] Connected (polling mode)');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.state = { status: 'error', error: msg };
@@ -103,6 +123,11 @@ export class OctoGateway extends EventEmitter {
   async stop(): Promise<void> {
     this.stopped = true;
     this.clearTimers();
+    if (this.ws) {
+      try { this.ws.removeAllListeners(); this.ws.disconnect(); } catch { /* ignore */ }
+      this.ws = null;
+    }
+    this.wsActive = false;
     this.seenMessageIds.clear();
     this.state = { status: 'disconnected' };
     this.logger.info('[OctoGateway] Stopped');
@@ -241,5 +266,67 @@ export class OctoGateway extends EventEmitter {
       case OCTO_MESSAGE_TYPE.FILE: return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
       default: return [{ type: 'text', text: payload.content ?? `[type=${payload.type}]` }];
     }
+  }
+
+  // ---- WebSocket integration ----
+
+  /**
+   * Attempt to start WebSocket transport. Returns true on success.
+   * On failure, logs the error and returns false so the caller can
+   * fall back to HTTP polling.
+   */
+  private async tryStartWebSocket(wsUrl: string, uid: string, imToken: string): Promise<boolean> {
+    try {
+      const ws = new OctoWebSocket(this.logger);
+
+      ws.on('message', (msg: OctoWsMessage) => this.handleWsMessage(msg));
+
+      ws.on('disconnect', () => {
+        if (!this.stopped && this.wsActive) {
+          this.logger.warn('[OctoGateway] WS disconnected — OctoWebSocket will auto-reconnect');
+        }
+      });
+
+      await ws.connect(wsUrl, uid, imToken);
+      this.ws = ws;
+      this.wsActive = true;
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        '[OctoGateway] WebSocket connection failed, falling back to polling:',
+        err instanceof Error ? err.message : err,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Convert an OctoWsMessage into the InboundMessage format
+   * and emit through the standard 'inbound' event — same dedup
+   * gate used by the polling path.
+   */
+  private handleWsMessage(msg: OctoWsMessage): void {
+    const messageId = String(msg.messageId);
+    if (this.seenMessageIds.has(messageId)) return;
+    this.seenMessageIds.set(messageId, Date.now());
+
+    const channelType = msg.channelType || (msg.channelId ? OCTO_CHANNEL_TYPE.GROUP : OCTO_CHANNEL_TYPE.DM);
+    const chatId = msg.channelId || msg.fromUid;
+    const content: ContentItem[] = this.parsePayload(msg.payload);
+
+    const inbound: InboundMessage = {
+      messageId,
+      content,
+      sender: { senderId: msg.fromUid, senderName: msg.fromUid },
+      timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+      replyContext: {
+        chatId,
+        channelType: String(channelType),
+        connectionMode: 'websocket',
+        userId: msg.fromUid,
+        msgType: String(msg.payload.type),
+      },
+    };
+    this.emit('inbound', inbound);
   }
 }
