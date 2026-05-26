@@ -28,7 +28,7 @@ export interface InboundMessage {
   sender: { senderId: string; senderName: string };
   timestamp: string;
   /** Group info — present for group/thread messages. */
-  group?: { groupId: string; chatType: 'group' | 'direct' };
+  group?: { groupId: string; chatType: 'group' | 'thread' };
   /** Whether the bot was @mentioned in this message. */
   botMentioned?: boolean;
   replyContext: {

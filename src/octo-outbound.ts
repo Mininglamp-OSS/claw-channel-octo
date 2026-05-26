@@ -48,8 +48,13 @@ function mimeFromFilename(filename: string): string {
 export class OctoOutbound {
   private apiUrl = '';
   private botToken = '';
-  /** Tracks thinking message IDs per chat for ack→final edit flow. */
+  /** Tracks thinking message IDs. Key = requestId or chatId as fallback. */
   private thinkingStreams = new Map<string, string>();
+
+  /** Derive a tracking key — prefer requestId for concurrency safety. */
+  private trackingKey(replyContext: Record<string, unknown>): string {
+    return String(replyContext.requestId ?? replyContext.sessionId ?? replyContext.chatId ?? '');
+  }
 
   constructor(private logger: Logger) {}
 
@@ -75,9 +80,10 @@ export class OctoOutbound {
     try {
       // --- Handle deliveryMode="ack" — send thinking placeholder ---
       if (message.deliveryMode === 'ack') {
+        const key = this.trackingKey(message.replyContext);
         const msgId = await this.sendMessage(chatId, channelType, { type: 1, content: '…' });
-        if (msgId) {
-          this.thinkingStreams.set(chatId, msgId);
+        if (msgId && key) {
+          this.thinkingStreams.set(key, msgId);
         }
         return { success: true };
       }
@@ -113,16 +119,27 @@ export class OctoOutbound {
         }
       }
 
-      // If we have a thinking stream for this chat, edit it with final text
+      // Resolve thinking stream — always clear on final path
+      const key = this.trackingKey(message.replyContext);
+      const thinkingMsgId = key ? this.thinkingStreams.get(key) : undefined;
+      if (key) this.thinkingStreams.delete(key);
+
       let messageId: string | undefined;
-      const thinkingMsgId = this.thinkingStreams.get(chatId);
-      if (thinkingMsgId && text) {
-        await this.editMessage(thinkingMsgId, chatId, channelType, text);
-        this.thinkingStreams.delete(chatId);
-        messageId = thinkingMsgId;
+      if (text && thinkingMsgId) {
+        // Edit thinking placeholder to final text
+        try {
+          await this.editMessage(thinkingMsgId, chatId, channelType, text);
+          messageId = thinkingMsgId;
+        } catch {
+          // Edit failed (msg deleted, expired) — send fresh
+          messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
+        }
       } else if (text) {
         messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
-        this.thinkingStreams.delete(chatId); // clear stale if any
+      } else if (thinkingMsgId) {
+        // No text, only files — clear the thinking placeholder
+        try { await this.editMessage(thinkingMsgId, chatId, channelType, ' '); } catch { /* best-effort */ }
+        messageId = thinkingMsgId;
       }
 
       // Send files

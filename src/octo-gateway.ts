@@ -1,6 +1,6 @@
 import { request } from 'undici';
 import type { ConnectionState, PluginAccount, InboundMessage, ContentItem } from './index.js';
-import { OCTO_CHANNEL_TYPE, OCTO_MESSAGE_TYPE } from './octo-types.js';
+import { OCTO_CHANNEL_TYPE, OCTO_MESSAGE_TYPE, isThreadChannelId, parseThreadChannelId } from './octo-types.js';
 import { OctoWebSocket, type OctoWsMessage } from './octo-websocket.js';
 
 interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void; }
@@ -27,6 +27,7 @@ export class OctoGateway {
   private apiUrl = '';
   private botToken = '';
   private botUid = '';
+  private botName = '';
   private account: PluginAccount | null = null;
   private ws: OctoWebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -84,6 +85,7 @@ export class OctoGateway {
       }
 
       this.botUid = robotId;
+      this.botName = typeof regData.name === 'string' ? regData.name : '';
       this.logger.info(`[OctoGateway] Bot registered: ${robotId}`);
 
       const ws = new OctoWebSocket(this.logger);
@@ -91,7 +93,10 @@ export class OctoGateway {
       ws.on('message', (msg: OctoWsMessage) => this.handleMessage(msg));
       ws.on('connect', () => { if (!this.stopped) this.setState({ status: 'connected' }); });
       ws.on('disconnect', () => { if (!this.stopped) this.setState({ status: 'connecting' }); });
-      ws.on('fatal', (err: Error) => { this.setState({ status: 'error', error: err.message }); });
+      ws.on('fatal', (err: Error) => {
+        this.logger.error('[OctoGateway] WebSocket fatal:', err.message);
+        this.setState({ status: 'error', error: err.message });
+      });
 
       await ws.connect(wsUrl, robotId, imToken);
 
@@ -157,12 +162,25 @@ export class OctoGateway {
     const content: ContentItem[] = this.parsePayload(msg.payload);
 
     // Determine group info
-    const isGroup = channelType === OCTO_CHANNEL_TYPE.GROUP || channelType === 5; // 5 = Thread
-    const group = isGroup ? { groupId: chatId, chatType: 'group' as const } : undefined;
+    const isGroup = channelType === OCTO_CHANNEL_TYPE.GROUP || channelType === 5;
+    let group: InboundMessage['group'];
+    if (isGroup) {
+      // For threads, extract parent group ID
+      const groupId = (channelType === 5 && isThreadChannelId(chatId))
+        ? parseThreadChannelId(chatId)!.groupNo
+        : chatId;
+      const chatType = channelType === 5 ? 'thread' as const : 'group' as const;
+      group = { groupId, chatType };
+    }
 
-    // Detect @bot mention
+    // Detect @bot mention — check Octo rich text format @[uid:name] and plain @name
     const textContent = msg.payload.content ?? '';
-    const botMentioned = isGroup ? textContent.includes(`@${this.botUid}`) || textContent.includes('@所有人') : undefined;
+    let botMentioned: boolean | undefined;
+    if (isGroup) {
+      botMentioned = textContent.includes(`@[${this.botUid}:`)
+        || (this.botName !== '' && textContent.includes(`@${this.botName}`))
+        || textContent.includes('@所有人');
+    }
 
     const inbound: InboundMessage = {
       messageId,
