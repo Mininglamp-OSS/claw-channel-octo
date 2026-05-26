@@ -48,6 +48,13 @@ function mimeFromFilename(filename: string): string {
 export class OctoOutbound {
   private apiUrl = '';
   private botToken = '';
+  /** Tracks thinking message IDs. Key = requestId or chatId as fallback. */
+  private thinkingStreams = new Map<string, string>();
+
+  /** Derive a tracking key — prefer requestId for concurrency safety. */
+  private trackingKey(replyContext: Record<string, unknown>): string {
+    return String(replyContext.requestId ?? replyContext.sessionId ?? replyContext.chatId ?? '');
+  }
 
   constructor(private logger: Logger) {}
 
@@ -69,42 +76,78 @@ export class OctoOutbound {
     if (!chatId) {
       return { success: false, error: 'Missing chatId in replyContext' };
     }
-    if (!text && (!message.files || message.files.length === 0)) {
-      return { success: false, error: 'No text or files to send' };
-    }
 
     try {
+      // --- Handle deliveryMode="ack" — send thinking placeholder ---
+      if (message.deliveryMode === 'ack') {
+        const key = this.trackingKey(message.replyContext);
+        const msgId = await this.sendMessage(chatId, channelType, { type: 1, content: '…' });
+        if (msgId && key) {
+          this.thinkingStreams.set(key, msgId);
+        }
+        return { success: true };
+      }
+
+      // --- Handle exec_approval metadata — send immediately regardless of mode ---
+      if (message.metadata?.state?.startsWith('exec_approval')) {
+        if (text) await this.sendMessage(chatId, channelType, { type: 1, content: text });
+        return { success: true };
+      }
+
+      // --- Handle deliveryMode="streaming" — typing indicator ---
       if (message.deliveryMode === 'streaming') {
         await this.sendTyping(chatId, channelType);
         return { success: true };
       }
 
-      // --- Atomic send: resolve all file URLs FIRST, then send messages ---
-      // If any upload fails, nothing has been sent yet, so retry is safe.
+      // --- Handle deliveryMode="final" or default — send actual content ---
+      if (!text && (!message.files || message.files.length === 0) && (!message.artifactFiles || message.artifactFiles.length === 0)) {
+        return { success: false, error: 'No text or files to send' };
+      }
+
+      // Resolve all files (files + artifactFiles) atomically
+      const allRawFiles = [...(message.files ?? []), ...(message.artifactFiles ?? [])];
       const resolvedFiles: Array<{ url: string; name: string }> = [];
-      if (message.files) {
-        for (const file of message.files) {
-          if (file.url) {
-            resolvedFiles.push({ url: file.url, name: file.name });
-          } else if (file.path) {
-            const uploaded = await this.uploadFile(file.path);
-            resolvedFiles.push({ url: uploaded.url, name: file.name || uploaded.name });
-          } else {
-            return { success: false, error: `File "${file.name}" has neither url nor path` };
-          }
+      for (const file of allRawFiles) {
+        if (file.url) {
+          resolvedFiles.push({ url: file.url, name: file.name });
+        } else if (file.path) {
+          const uploaded = await this.uploadFile(file.path);
+          resolvedFiles.push({ url: uploaded.url, name: file.name || uploaded.name });
+        } else {
+          return { success: false, error: `File "${file.name}" has neither url nor path` };
         }
       }
 
-      // Now send — text first, then files
+      // Resolve thinking stream — always clear on final path
+      const key = this.trackingKey(message.replyContext);
+      const thinkingMsgId = key ? this.thinkingStreams.get(key) : undefined;
+      if (key) this.thinkingStreams.delete(key);
+
       let messageId: string | undefined;
-      if (text) {
+      if (text && thinkingMsgId) {
+        // Edit thinking placeholder to final text
+        try {
+          await this.editMessage(thinkingMsgId, chatId, channelType, text);
+          messageId = thinkingMsgId;
+        } catch {
+          // Edit failed (msg deleted, expired) — send fresh
+          messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
+        }
+      } else if (text) {
         messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
+      } else if (thinkingMsgId) {
+        // No text, only files — clear the thinking placeholder
+        try { await this.editMessage(thinkingMsgId, chatId, channelType, ' '); } catch { /* best-effort */ }
+        messageId = thinkingMsgId;
       }
+
+      // Send files
       for (const file of resolvedFiles) {
         await this.sendMessage(chatId, channelType, { type: 8, url: file.url, name: file.name });
       }
 
-      this.logger.info(`[OctoOutbound] Sent reply to ${chatId} (type=${channelType}), textLen=${text.length}, files=${resolvedFiles.length}`);
+      this.logger.info(`[OctoOutbound] Sent to ${chatId} (type=${channelType}), text=${text.length}, files=${resolvedFiles.length}`);
       return { success: true, messageId };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
