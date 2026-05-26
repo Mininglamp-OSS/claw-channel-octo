@@ -1,6 +1,6 @@
 import { request } from 'undici';
 import { readFile } from 'node:fs/promises';
-import { basename } from 'node:path';
+import { basename, extname } from 'node:path';
 import type { OutboundMessage, SendResult } from './index.js';
 
 interface Logger {
@@ -21,13 +21,27 @@ interface SendMessageResult {
   message_id?: string;
 }
 
+const REQUEST_OPTS = { headersTimeout: 10_000, bodyTimeout: 30_000 } as const;
+
+/** Simple MIME detection by extension. */
+function mimeFromFilename(filename: string): string {
+  const ext = extname(filename).toLowerCase();
+  const map: Record<string, string> = {
+    '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+    '.gif': 'image/gif', '.webp': 'image/webp', '.svg': 'image/svg+xml',
+    '.pdf': 'application/pdf', '.mp4': 'video/mp4', '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav', '.zip': 'application/zip', '.json': 'application/json',
+    '.txt': 'text/plain', '.html': 'text/html', '.css': 'text/css',
+  };
+  return map[ext] ?? 'application/octet-stream';
+}
+
 /**
  * OctoOutbound handles sending replies from WorkBuddy Agent back to Octo.
- * Called by ClawPluginHost.sendOutbound("octo", message).
  *
  * Capabilities:
  * - Text / image / file message sending
- * - File upload (local path → Octo storage URL)
+ * - File upload (local path → Octo storage URL, uses FormData for safe multipart)
  * - Streaming replies via message edit pattern (send → edit → edit → final)
  * - Typing indicator
  */
@@ -65,21 +79,32 @@ export class OctoOutbound {
         return { success: true };
       }
 
+      // --- Atomic send: resolve all file URLs FIRST, then send messages ---
+      // If any upload fails, nothing has been sent yet, so retry is safe.
+      const resolvedFiles: Array<{ url: string; name: string }> = [];
+      if (message.files) {
+        for (const file of message.files) {
+          if (file.url) {
+            resolvedFiles.push({ url: file.url, name: file.name });
+          } else if (file.path) {
+            const uploaded = await this.uploadFile(file.path);
+            resolvedFiles.push({ url: uploaded.url, name: file.name || uploaded.name });
+          } else {
+            return { success: false, error: `File "${file.name}" has neither url nor path` };
+          }
+        }
+      }
+
+      // Now send — text first, then files
       let messageId: string | undefined;
       if (text) {
         messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
       }
-
-      if (message.files) {
-        for (const file of message.files) {
-          // If file has a local path but no URL, upload first
-          const fileUrl = file.url || (file.path ? (await this.uploadFile(file.path)).url : '');
-          if (!fileUrl) continue;
-          await this.sendMessage(chatId, channelType, { type: 8, url: fileUrl, name: file.name });
-        }
+      for (const file of resolvedFiles) {
+        await this.sendMessage(chatId, channelType, { type: 8, url: file.url, name: file.name });
       }
 
-      this.logger.info(`[OctoOutbound] Sent reply to ${chatId} (type=${channelType}), textLen=${text.length}`);
+      this.logger.info(`[OctoOutbound] Sent reply to ${chatId} (type=${channelType}), textLen=${text.length}, files=${resolvedFiles.length}`);
       return { success: true, messageId };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
@@ -106,19 +131,19 @@ export class OctoOutbound {
 
   /**
    * Upload a buffer to Octo storage.
-   * @param buffer File content as Buffer
-   * @param filename Name for the uploaded file
-   * @returns Upload result with the hosted URL
+   * Filename is sanitized to prevent multipart header injection.
    */
   async uploadBuffer(buffer: Buffer, filename: string): Promise<UploadResult> {
     if (!this.apiUrl || !this.botToken) {
       throw new Error('Outbound not configured — call configure() first');
     }
 
-    // Build multipart/form-data manually using a boundary
+    const mimeType = mimeFromFilename(filename);
+    // Sanitize filename: remove control chars, quotes, backslashes
+    const safeName = filename.replace(/[\x00-\x1f\x7f"\\]/g, '_');
     const boundary = `----OctoUpload${Date.now()}${Math.random().toString(36).slice(2)}`;
     const header = Buffer.from(
-      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`,
+      `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${safeName}"\r\nContent-Type: ${mimeType}\r\n\r\n`,
     );
     const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
     const body = Buffer.concat([header, buffer, footer]);
@@ -131,6 +156,7 @@ export class OctoOutbound {
         'Content-Length': String(body.byteLength),
       },
       body,
+      ...REQUEST_OPTS,
     });
 
     if (res.statusCode >= 400) {
@@ -146,13 +172,7 @@ export class OctoOutbound {
   // ---- Streaming (Message Edit) ----
 
   /**
-   * Edit an already-sent message. Used for streaming pattern:
-   * send initial partial text → progressively edit with more content → final edit.
-   *
-   * @param messageId The message_id returned from the initial send
-   * @param channelId Target channel
-   * @param channelType Target channel type
-   * @param text Updated full text content
+   * Edit an already-sent message. Used for streaming pattern.
    */
   async editMessage(messageId: string, channelId: string, channelType: number, text: string): Promise<void> {
     if (!this.apiUrl || !this.botToken) {
@@ -167,6 +187,7 @@ export class OctoOutbound {
         channel_type: channelType,
         payload: { type: 1, content: text },
       }),
+      ...REQUEST_OPTS,
     });
     if (res.statusCode >= 400) {
       const data = await res.body.text();
@@ -177,8 +198,10 @@ export class OctoOutbound {
 
   /**
    * Send a streaming text message: initial send followed by progressive edits.
-   * Returns an object with an `update()` method for appending text and `finish()`
-   * for the final edit.
+   *
+   * Note: Each `update()` call re-sends the full accumulated text via editMessage.
+   * This is O(n²) for long generation streams. For callers that buffer their own
+   * text, use `replace()` instead of `update()` to avoid double-buffering.
    */
   async startStreaming(channelId: string, channelType: number, initialText: string): Promise<StreamingMessage> {
     const messageId = await this.sendMessage(channelId, channelType, { type: 1, content: initialText });
@@ -195,10 +218,11 @@ export class OctoOutbound {
       method: 'POST',
       headers: { Authorization: `Bearer ${this.botToken}`, 'Content-Type': 'application/json' },
       body: JSON.stringify({ channel_id: channelId, channel_type: channelType, payload }),
+      ...REQUEST_OPTS,
     });
     if (res.statusCode >= 400) {
-      const data = await res.body.json();
-      throw new Error(`sendMessage failed (${res.statusCode}): ${JSON.stringify(data)}`);
+      const data = await res.body.text();
+      throw new Error(`sendMessage failed (${res.statusCode}): ${data}`);
     }
     const result = await res.body.json() as SendMessageResult;
     return result.message_id;
@@ -210,6 +234,7 @@ export class OctoOutbound {
         method: 'POST',
         headers: { Authorization: `Bearer ${this.botToken}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ channel_id: channelId, channel_type: channelType }),
+        ...REQUEST_OPTS,
       });
       await res.body.dump();
     } catch { /* best-effort */ }
@@ -218,7 +243,7 @@ export class OctoOutbound {
 
 /**
  * Represents a message being streamed (progressively edited).
- * Created by OctoOutbound.startStreaming().
+ * State is only committed after a successful edit.
  */
 export class StreamingMessage {
   private text: string;
@@ -234,18 +259,30 @@ export class StreamingMessage {
     this.text = initialText;
   }
 
-  /** Append text and push an edit. */
+  /** Append text and push an edit. Reverts local state on failure. */
   async update(additionalText: string): Promise<void> {
     if (this.finished) throw new Error('StreamingMessage already finished');
+    const prev = this.text;
     this.text += additionalText;
-    await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+    try {
+      await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+    } catch (err) {
+      this.text = prev;
+      throw err;
+    }
   }
 
-  /** Replace full text and push an edit. */
+  /** Replace full text and push an edit. Reverts on failure. */
   async replace(fullText: string): Promise<void> {
     if (this.finished) throw new Error('StreamingMessage already finished');
+    const prev = this.text;
     this.text = fullText;
-    await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+    try {
+      await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+    } catch (err) {
+      this.text = prev;
+      throw err;
+    }
   }
 
   /** Mark streaming complete with final text. */

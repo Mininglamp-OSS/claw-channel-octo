@@ -335,3 +335,116 @@ describe('OctoPlugin Integration', () => {
     });
   });
 });
+
+describe('Review Fixes', () => {
+  let server: MockOctoServer;
+
+  before(async () => { server = await startMockOctoServer(); });
+  after(async () => { await server.stop(); });
+  beforeEach(() => { server.reset(); });
+
+  const logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  describe('WS Handshake Rejection', () => {
+    it('gateway rejects and cleans up when WS handshake returns reasonCode=1', async () => {
+      server.wsRejectHandshake = true;
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await assert.rejects(() => plugin.gateway.start(account), /reasonCode=1/);
+      assert.equal(plugin.gateway.getConnectionState().status, 'error');
+      // No orphan WS connections left
+      await sleep(100);
+      assert.equal(server.connectedWsClients, 0);
+    });
+  });
+
+  describe('File Validation', () => {
+    it('rejects file with neither url nor path', async () => {
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await plugin.gateway.start(account);
+
+      const result = await plugin.outbound.send({
+        files: [{ name: 'missing.pdf' }],
+        replyContext: { chatId: 'u1', channelType: '1' },
+      });
+      assert.equal(result.success, false);
+      assert.match(result.error!, /neither url nor path/);
+      // No sendMessage should have been called (atomic: fail before sending)
+      const sendReqs = server.requests.filter(r => r.path === '/v1/bot/sendMessage');
+      assert.equal(sendReqs.length, 0);
+      await plugin.gateway.stop();
+    });
+
+    it('atomic send: text is NOT sent if file upload fails', async () => {
+      server.sendMessageStatus = 200; // sendMessage works
+      // But we'll send a file with no url/path, which fails validation before any HTTP
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await plugin.gateway.start(account);
+
+      const result = await plugin.outbound.send({
+        text: 'should not be sent',
+        files: [{ name: 'bad.pdf' }],
+        replyContext: { chatId: 'u1', channelType: '1' },
+      });
+      assert.equal(result.success, false);
+      // Text must NOT have been sent
+      const sendReqs = server.requests.filter(r => r.path === '/v1/bot/sendMessage');
+      assert.equal(sendReqs.length, 0);
+      await plugin.gateway.stop();
+    });
+  });
+
+  describe('File Upload', () => {
+    it('uploadBuffer sends to /v1/bot/file/upload and returns URL', async () => {
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await plugin.gateway.start(account);
+
+      const result = await plugin.outbound.uploadBuffer(Buffer.from('hello'), 'test.txt');
+      assert.equal(result.url, 'https://octo.storage/uploaded-file.pdf');
+      assert.equal(result.name, 'file.pdf');
+      const uploadReq = server.requests.find(r => r.path === '/v1/bot/file/upload');
+      assert.ok(uploadReq);
+      await plugin.gateway.stop();
+    });
+  });
+
+  describe('Streaming', () => {
+    it('startStreaming → update → finish sends initial + 2 edits', async () => {
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await plugin.gateway.start(account);
+
+      const stream = await plugin.outbound.startStreaming('ch_1', 2, 'Hello');
+      assert.equal(stream.messageId, 'mock_msg_001');
+
+      await stream.update(' world');
+      assert.equal(stream.getText(), 'Hello world');
+
+      await stream.finish('Hello world!');
+      assert.equal(stream.isFinished(), true);
+
+      const editReqs = server.requests.filter(r => r.path === '/v1/bot/message/edit');
+      assert.equal(editReqs.length, 2); // update + finish
+      await plugin.gateway.stop();
+    });
+  });
+
+  describe('editMessage', () => {
+    it('sends correct payload to /v1/bot/message/edit', async () => {
+      const plugin = createOctoPlugin({ logger });
+      const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+      await plugin.gateway.start(account);
+
+      await plugin.outbound.editMessage('msg_abc', 'ch_1', 2, 'edited text');
+      const editReq = server.requests.find(r => r.path === '/v1/bot/message/edit');
+      assert.ok(editReq);
+      const body = editReq!.body as Record<string, unknown>;
+      assert.equal(body.message_id, 'msg_abc');
+      assert.deepEqual(body.payload, { type: 1, content: 'edited text' });
+      await plugin.gateway.stop();
+    });
+  });
+});

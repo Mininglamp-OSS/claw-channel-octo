@@ -21,6 +21,8 @@ export class MockOctoServer {
   registerStatus = 200;
   sendMessageStatus = 200;
   sendMessageResponse: unknown = { success: true, message_id: 'mock_msg_001' };
+  /** When true, WS handshake returns reasonCode: 1 (rejected). */
+  wsRejectHandshake = false;
 
   private server!: HttpServer;
   private wss!: WebSocketServer;
@@ -81,6 +83,7 @@ export class MockOctoServer {
     this.registerStatus = 200;
     this.sendMessageStatus = 200;
     this.sendMessageResponse = { success: true, message_id: 'mock_msg_001' };
+    this.wsRejectHandshake = false;
   }
 
   countRequests(predicate: (r: MockRequest) => boolean): number {
@@ -131,12 +134,19 @@ export class MockOctoServer {
     } catch { return; }
 
     if (parsed.method === 'connect') {
-      // Respond with successful handshake
-      ws.send(JSON.stringify({
-        jsonrpc: '2.0',
-        id: parsed.id,
-        result: { serverKey: 'test', salt: 'test', timeDiff: 0, reasonCode: 0 },
-      }));
+      if (this.wsRejectHandshake) {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { serverKey: 'test', salt: 'test', timeDiff: 0, reasonCode: 1 },
+        }));
+      } else {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { serverKey: 'test', salt: 'test', timeDiff: 0, reasonCode: 0 },
+        }));
+      }
       return;
     }
     if (parsed.method === 'ping') {

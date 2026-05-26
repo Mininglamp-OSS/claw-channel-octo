@@ -7,6 +7,7 @@ import { OctoWebSocket, type OctoWsMessage } from './octo-websocket.js';
 interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void; }
 
 const DEDUP_TTL_MS = 5 * 60 * 1000;
+const REQUEST_OPTS = { headersTimeout: 10_000, bodyTimeout: 30_000 } as const;
 
 /**
  * OctoGateway manages the real-time WebSocket connection to Octo.
@@ -53,18 +54,20 @@ export class OctoGateway extends EventEmitter {
     this.logger.info('[OctoGateway] Starting with apiUrl:', apiUrl);
 
     try {
-      // Register bot — confirms connectivity and gets WebSocket credentials
+      // Register bot — check status FIRST, parse JSON only on success
       const regRes = await request(`${apiUrl}/v1/bot/register`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
         body: '{}',
+        ...REQUEST_OPTS,
       });
-      const regData = await regRes.body.json() as Record<string, unknown>;
 
       if (regRes.statusCode >= 400) {
-        throw new Error(`Register failed (${regRes.statusCode}): ${JSON.stringify(regData)}`);
+        const errBody = await regRes.body.text();
+        throw new Error(`Register failed (${regRes.statusCode}): ${errBody}`);
       }
 
+      const regData = await regRes.body.json() as Record<string, unknown>;
       const wsUrl = typeof regData.ws_url === 'string' ? regData.ws_url : '';
       const imToken = typeof regData.im_token === 'string' ? regData.im_token : '';
       const robotId = typeof regData.robot_id === 'string' ? regData.robot_id : '';
@@ -75,13 +78,18 @@ export class OctoGateway extends EventEmitter {
 
       this.logger.info(`[OctoGateway] Bot registered: ${robotId}`);
 
-      // Connect WebSocket — mandatory, not optional
+      // Connect WebSocket
       const ws = new OctoWebSocket(this.logger);
       ws.on('message', (msg: OctoWsMessage) => this.handleMessage(msg));
+      ws.on('connect', () => {
+        if (!this.stopped) this.state = { status: 'connected' };
+      });
       ws.on('disconnect', () => {
-        if (!this.stopped) {
-          this.logger.warn('[OctoGateway] WS disconnected — auto-reconnecting');
-        }
+        if (!this.stopped) this.state = { status: 'connecting' };
+      });
+      ws.on('fatal', (err: Error) => {
+        this.state = { status: 'error', error: err.message };
+        this.logger.error('[OctoGateway] WebSocket fatal:', err.message);
       });
 
       await ws.connect(wsUrl, robotId, imToken);
@@ -121,6 +129,7 @@ export class OctoGateway extends EventEmitter {
           method: 'POST',
           headers: { Authorization: `Bearer ${this.botToken}`, 'Content-Type': 'application/json' },
           body: '{}',
+          ...REQUEST_OPTS,
         });
         await res.body.dump();
       } catch { /* best-effort */ }
@@ -163,10 +172,20 @@ export class OctoGateway extends EventEmitter {
 
   private parsePayload(payload: OctoWsMessage['payload']): ContentItem[] {
     switch (payload.type) {
-      case OCTO_MESSAGE_TYPE.TEXT: return [{ type: 'text', text: payload.content ?? '' }];
-      case OCTO_MESSAGE_TYPE.IMAGE: return [{ type: 'image', url: payload.url }];
-      case OCTO_MESSAGE_TYPE.FILE: return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
-      default: return [{ type: 'text', text: payload.content ?? `[type=${payload.type}]` }];
+      case OCTO_MESSAGE_TYPE.TEXT:
+        return [{ type: 'text', text: payload.content ?? '' }];
+      case OCTO_MESSAGE_TYPE.IMAGE:
+      case 3: // GIF
+        return [{ type: 'image', url: payload.url }];
+      case 4: // Voice
+        return [{ type: 'file', url: payload.url, name: 'voice' }];
+      case 5: // Video
+        return [{ type: 'file', url: payload.url, name: payload.name ?? 'video' }];
+      case OCTO_MESSAGE_TYPE.FILE:
+        return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
+      default:
+        this.logger.warn(`[OctoGateway] Unknown payload type ${payload.type}, treating as text`);
+        return [{ type: 'text', text: payload.content ?? `[unsupported type=${payload.type}]` }];
     }
   }
 }

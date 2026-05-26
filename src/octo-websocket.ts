@@ -43,6 +43,7 @@ interface ConnectResult {
 const PING_INTERVAL_MS = 25_000;
 const CONNECT_TIMEOUT_MS = 10_000;
 const RECONNECT_BACKOFF_MAX_MS = 60_000;
+const MAX_RECONNECT_ATTEMPTS = 10;
 const DEVICE_FLAG_WEB = 2;
 
 /**
@@ -68,8 +69,10 @@ export class OctoWebSocket extends EventEmitter {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private connectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempt = 0;
+  private isReconnecting = false;
   private connected = false;
   private stopped = false;
+  private connectRequestId = '';
   private pending: { resolve: () => void; reject: (err: Error) => void } | null = null;
 
   constructor(private logger: Logger) { super(); }
@@ -88,6 +91,7 @@ export class OctoWebSocket extends EventEmitter {
     this.deviceId = `claw_${randomUUID()}`;
     this.stopped = false;
     this.reconnectAttempt = 0;
+    this.isReconnecting = false;
     return this.openAndHandshake();
   }
 
@@ -128,6 +132,7 @@ export class OctoWebSocket extends EventEmitter {
       }, CONNECT_TIMEOUT_MS);
 
       ws.on('open', () => {
+        this.connectRequestId = randomUUID();
         const req: JsonRpcRequest = {
           jsonrpc: '2.0',
           method: 'connect',
@@ -137,7 +142,7 @@ export class OctoWebSocket extends EventEmitter {
             deviceId: this.deviceId,
             deviceFlag: DEVICE_FLAG_WEB,
           },
-          id: randomUUID(),
+          id: this.connectRequestId,
         };
         this.sendRaw(req);
       });
@@ -152,6 +157,8 @@ export class OctoWebSocket extends EventEmitter {
           if (this.connectTimer) { clearTimeout(this.connectTimer); this.connectTimer = null; }
           p.reject(err);
         }
+        // Do NOT schedule reconnect here — `close` handler is the single
+        // scheduler. ws emits 'close' after 'error', so the close path runs.
       });
 
       ws.on('close', (code: number, reason: Buffer) => {
@@ -169,7 +176,7 @@ export class OctoWebSocket extends EventEmitter {
           this.emit('disconnect', { code, reason: reason.toString() });
           this.logger.warn(`[OctoWebSocket] disconnected (code=${code})`);
         }
-        if (!this.stopped) this.scheduleReconnect();
+        if (!this.stopped && !this.isReconnecting) this.scheduleReconnect();
       });
     });
   }
@@ -186,8 +193,11 @@ export class OctoWebSocket extends EventEmitter {
       return;
     }
 
-    // JSON-RPC response (to our `connect` request)
-    if (parsed.result !== undefined || parsed.error !== undefined) {
+    // JSON-RPC response correlated to our `connect` request id.
+    // Any other id (or no id) for a response frame is ignored — prevents
+    // a stray late response from re-entering the handshake handler.
+    if ((parsed.result !== undefined || parsed.error !== undefined)
+        && parsed.id !== undefined && parsed.id === this.connectRequestId) {
       this.handleHandshakeResponse(parsed);
       return;
     }
@@ -213,17 +223,25 @@ export class OctoWebSocket extends EventEmitter {
     this.pending = null;
 
     if (resp.error) {
-      const err = new Error(`connect rpc error: ${resp.error.message} (code=${resp.error.code})`);
-      pending?.reject(err);
+      // Reject and immediately tear down so the orphan socket can't trigger
+      // a reconnect loop on auth/permission failures.
+      this.stopped = true;
+      try { this.ws?.terminate(); } catch { /* ignore */ }
+      this.ws = null;
+      pending?.reject(new Error(`connect rpc error: ${resp.error.message} (code=${resp.error.code})`));
       return;
     }
     const result = (resp.result ?? {}) as unknown as ConnectResult;
     if (result.reasonCode !== 0) {
+      this.stopped = true;
+      try { this.ws?.terminate(); } catch { /* ignore */ }
+      this.ws = null;
       pending?.reject(new Error(`connect refused: reasonCode=${result.reasonCode}`));
       return;
     }
     this.connected = true;
     this.reconnectAttempt = 0;
+    this.isReconnecting = false;
     this.startPing();
     this.emit('connect', result);
     this.logger.info('[OctoWebSocket] connected');
@@ -293,14 +311,26 @@ export class OctoWebSocket extends EventEmitter {
 
   private scheduleReconnect(): void {
     if (this.stopped) return;
+    if (this.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
+      this.stopped = true;
+      this.isReconnecting = false;
+      this.logger.error(`[OctoWebSocket] giving up after ${MAX_RECONNECT_ATTEMPTS} reconnect attempts`);
+      this.emit('fatal', new Error(`reconnect limit reached (${MAX_RECONNECT_ATTEMPTS})`));
+      return;
+    }
+    this.isReconnecting = true;
     const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempt), RECONNECT_BACKOFF_MAX_MS);
     this.reconnectAttempt += 1;
-    this.logger.info(`[OctoWebSocket] reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
+    this.logger.info(`[OctoWebSocket] reconnecting in ${delay}ms (attempt ${this.reconnectAttempt}/${MAX_RECONNECT_ATTEMPTS})`);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
-      if (this.stopped) return;
+      if (this.stopped) { this.isReconnecting = false; return; }
       this.openAndHandshake().catch((err) => {
         this.logger.warn('[OctoWebSocket] reconnect failed:', err instanceof Error ? err.message : err);
+        // Don't recurse synchronously — the failed openAndHandshake will have
+        // either rejected from a `close` (which schedules a new reconnect) or
+        // never opened. Clear the flag so `close` can schedule.
+        this.isReconnecting = false;
         if (!this.stopped) this.scheduleReconnect();
       });
     }, delay);
