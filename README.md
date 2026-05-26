@@ -12,7 +12,7 @@ WorkBuddy Claw 内置渠道插件 - 让 Octo IM 成为 WorkBuddy 的远程控制
 ```
 Octo 用户 @Bot
     ↓ WebSocket (JSON-RPC)
-OctoGateway (WebSocket primary / HTTP polling fallback)
+OctoGateway (WebSocket (JSON-RPC))
     ↓ emit('inbound', InboundMessage)
 ClawPluginHost → ClawService → ClawRuntime → Agent
     ↓
@@ -28,7 +28,7 @@ Agent 需要主动操作 → exec octo-cli commands (Skills)
 - 文本 / 图片 / 文件消息收发
 - 文件上传（本地文件 → Octo 存储 → URL 发送）
 - 流式回复（消息逐段编辑推送，适合长文本生成场景）
-- WebSocket 实时连接（JSON-RPC 协议，自动重连 + HTTP 轮询兜底）
+- WebSocket 实时连接（JSON-RPC 协议，自动重连）
 - Typing 指示器（Agent 处理中显示“正在输入”）
 - 自动心跳保活（30s 间隔）
 - 消息去重（5 分钟 TTL 缓存）
@@ -101,7 +101,7 @@ WorkBuddy 侧所需变更:
 |------|------|
 | `src/index.ts` | `createOctoPlugin` factory — ClawPluginHost 注册入口 |
 | `src/octo-config.ts` | `OctoConfigResolver` — 从 settings.json 解析 PluginAccount |
-| `src/octo-gateway.ts` | `OctoGateway` — WebSocket 连接 + HTTP 轮询兜底 + 心跳 + 重连 + 去重 |
+| `src/octo-gateway.ts` | `OctoGateway` — WebSocket 连接 + 心跳 + 自动重连 + 去重 |
 | `src/octo-websocket.ts` | `OctoWebSocket` — JSON-RPC over WebSocket 客户端（连接/ping/recv/ack）|
 | `src/octo-outbound.ts` | `OctoOutbound` — sendMessage / editMessage / uploadFile / typing / streaming |
 | `src/octo-types.ts` | Channel / Message 类型常量 + Thread channel_id 解析 |
@@ -125,7 +125,7 @@ npm run build
 
 - [x] Phase 1 - HTTP 事件轮询 MVP + 文本消息收发 + 心跳 + 重连 + 去重
 - [x] octo-cli 集成 - Agent Skills + connector descriptor + userConfig 凭证注入
-- [x] Phase 2 - WebSocket 实时连接(JSON-RPC 协议,HTTP 轮询自动兜底)
+- [x] Phase 2 - WebSocket 实时连接(JSON-RPC 协议,自动重连)
 - [x] Phase 2 - 流式回复(send → edit → edit → final 逐段推送)
 - [x] Phase 2 - 文件上传发送(本地路径 → POST /v1/bot/file/upload → URL → send)
 - [ ] Phase 3 - WorkBuddy Claw 设置面板 UI 集成

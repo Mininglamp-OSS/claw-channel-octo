@@ -6,30 +6,16 @@ import { OctoWebSocket, type OctoWsMessage } from './octo-websocket.js';
 
 interface Logger { info: (...a: unknown[]) => void; warn: (...a: unknown[]) => void; error: (...a: unknown[]) => void; }
 
-interface OctoRawMessage {
-  event_id?: number;
-  message: {
-    message_id: string | number;
-    from_uid: string;
-    channel_id?: string;
-    channel_type?: number;
-    payload: { type: number; content?: string; url?: string; name?: string; size?: number };
-    timestamp?: number;
-  };
-}
-
-const MAX_CONSECUTIVE_POLL_FAILURES = 10;
-const RECONNECT_BACKOFF_MAX_MS = 60_000;
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 
 /**
- * OctoGateway manages the real-time connection to Octo.
+ * OctoGateway manages the real-time WebSocket connection to Octo.
  *
- * Preferred transport is JSON-RPC over WebSocket (OctoWebSocket). If the
- * WebSocket handshake fails — bad URL, network policy, server-side issue —
- * the gateway falls back to HTTP event polling so messages still flow.
- * Heartbeat is kept on REST regardless, since bot online status is tracked
- * server-side via /v1/bot/heartbeat.
+ * Transport: JSON-RPC over WebSocket. No fallback — if the WebSocket
+ * connection fails, the gateway throws so the caller knows something
+ * is wrong (bad config, service down) instead of silently degrading.
+ *
+ * REST heartbeat is kept separately for bot online status tracking.
  *
  * Emits 'inbound' event with InboundMessage when a message arrives.
  */
@@ -38,17 +24,11 @@ export class OctoGateway extends EventEmitter {
   private apiUrl = '';
   private botToken = '';
   private account: PluginAccount | null = null;
-  private pollTimer: ReturnType<typeof setInterval> | null = null;
+  private ws: OctoWebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
   private dedupCleanupTimer: ReturnType<typeof setInterval> | null = null;
-  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
-  private lastEventId = 0;
   private stopped = false;
-  private consecutivePollFailures = 0;
-  private reconnectAttempt = 0;
   private seenMessageIds = new Map<string, number>();
-  private ws: OctoWebSocket | null = null;
-  private wsActive = false;
 
   constructor(
     private logger: Logger,
@@ -58,7 +38,6 @@ export class OctoGateway extends EventEmitter {
   getConnectionState(): ConnectionState { return this.state; }
 
   async start(account: PluginAccount): Promise<void> {
-    // Notify listeners (e.g. outbound credential injection) before connecting
     this.onAccountResolved?.(account);
     const botToken = typeof account.credential.botToken === 'string' ? account.credential.botToken : '';
     const apiUrl = typeof account.credential.apiUrl === 'string' ? account.credential.apiUrl : '';
@@ -74,7 +53,7 @@ export class OctoGateway extends EventEmitter {
     this.logger.info('[OctoGateway] Starting with apiUrl:', apiUrl);
 
     try {
-      // Register bot to confirm connectivity
+      // Register bot — confirms connectivity and gets WebSocket credentials
       const regRes = await request(`${apiUrl}/v1/bot/register`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
@@ -86,32 +65,34 @@ export class OctoGateway extends EventEmitter {
         throw new Error(`Register failed (${regRes.statusCode}): ${JSON.stringify(regData)}`);
       }
 
-      this.logger.info(`[OctoGateway] Bot registered: ${regData.robot_id}`);
-
-      this.consecutivePollFailures = 0;
-      this.reconnectAttempt = 0;
-
-      // Always keep REST heartbeat + dedup timer running
-      this.startHeartbeat();
-      this.startDedupCleanup();
-
-      // Prefer WebSocket if the register response gave us a ws_url + im_token.
-      // Fall back to HTTP polling on any failure so messages still flow.
       const wsUrl = typeof regData.ws_url === 'string' ? regData.ws_url : '';
       const imToken = typeof regData.im_token === 'string' ? regData.im_token : '';
       const robotId = typeof regData.robot_id === 'string' ? regData.robot_id : '';
-      let wsOk = false;
-      if (wsUrl && imToken && robotId) {
-        wsOk = await this.tryStartWebSocket(wsUrl, robotId, imToken);
-      }
-      if (!wsOk) {
-        this.startPolling();
-        this.logger.info('[OctoGateway] Connected (polling mode)');
-      } else {
-        this.logger.info('[OctoGateway] Connected (websocket mode)');
+
+      if (!wsUrl || !imToken || !robotId) {
+        throw new Error('Register response missing ws_url, im_token, or robot_id — cannot connect');
       }
 
+      this.logger.info(`[OctoGateway] Bot registered: ${robotId}`);
+
+      // Connect WebSocket — mandatory, not optional
+      const ws = new OctoWebSocket(this.logger);
+      ws.on('message', (msg: OctoWsMessage) => this.handleMessage(msg));
+      ws.on('disconnect', () => {
+        if (!this.stopped) {
+          this.logger.warn('[OctoGateway] WS disconnected — auto-reconnecting');
+        }
+      });
+
+      await ws.connect(wsUrl, robotId, imToken);
+      this.ws = ws;
+
+      // Heartbeat + dedup cleanup
+      this.startHeartbeat();
+      this.startDedupCleanup();
+
       this.state = { status: 'connected' };
+      this.logger.info('[OctoGateway] Connected (websocket)');
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       this.state = { status: 'error', error: msg };
@@ -122,99 +103,15 @@ export class OctoGateway extends EventEmitter {
 
   async stop(): Promise<void> {
     this.stopped = true;
-    this.clearTimers();
+    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
+    if (this.dedupCleanupTimer) { clearInterval(this.dedupCleanupTimer); this.dedupCleanupTimer = null; }
     if (this.ws) {
       try { this.ws.removeAllListeners(); this.ws.disconnect(); } catch { /* ignore */ }
       this.ws = null;
     }
-    this.wsActive = false;
     this.seenMessageIds.clear();
     this.state = { status: 'disconnected' };
     this.logger.info('[OctoGateway] Stopped');
-  }
-
-  private clearTimers(): void {
-    if (this.pollTimer) { clearInterval(this.pollTimer); this.pollTimer = null; }
-    if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
-    if (this.dedupCleanupTimer) { clearInterval(this.dedupCleanupTimer); this.dedupCleanupTimer = null; }
-    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
-  }
-
-  private startPolling(intervalMs = 2000): void {
-    this.pollTimer = setInterval(async () => {
-      if (this.stopped) return;
-      try {
-        const res = await request(
-          `${this.apiUrl}/v1/bot/events?last_event_id=${this.lastEventId}&limit=50`,
-          { method: 'GET', headers: { Authorization: `Bearer ${this.botToken}` } },
-        );
-        const data = await res.body.json() as OctoRawMessage[] | { events?: OctoRawMessage[] };
-        const events: OctoRawMessage[] = Array.isArray(data) ? data : (data as { events?: OctoRawMessage[] }).events ?? [];
-
-        // Reset failure counter on any successful poll
-        this.consecutivePollFailures = 0;
-
-        for (const event of events) {
-          if (event.event_id && event.event_id > this.lastEventId) {
-            this.lastEventId = event.event_id;
-          }
-          const msg = event.message;
-          if (!msg) continue;
-
-          const messageId = String(msg.message_id);
-          if (this.seenMessageIds.has(messageId)) {
-            // Duplicate — skip silently, but still ack
-          } else {
-            this.seenMessageIds.set(messageId, Date.now());
-            const inbound = this.buildInbound(msg);
-            this.emit('inbound', inbound);
-          }
-
-          // Ack event
-          try {
-            const ackRes = await request(`${this.apiUrl}/v1/bot/events/${event.event_id}/ack`, {
-              method: 'POST',
-              headers: { Authorization: `Bearer ${this.botToken}` },
-            });
-            await ackRes.body.dump();
-          } catch { /* best-effort */ }
-        }
-      } catch (err) {
-        this.consecutivePollFailures += 1;
-        this.logger.warn(
-          `[OctoGateway] Poll error (${this.consecutivePollFailures}/${MAX_CONSECUTIVE_POLL_FAILURES}):`,
-          err instanceof Error ? err.message : err,
-        );
-        if (this.consecutivePollFailures >= MAX_CONSECUTIVE_POLL_FAILURES) {
-          this.handlePollFailureThreshold();
-        }
-      }
-    }, intervalMs);
-  }
-
-  private handlePollFailureThreshold(): void {
-    const errMsg = `Poll failed ${MAX_CONSECUTIVE_POLL_FAILURES} times consecutively`;
-    this.logger.error(`[OctoGateway] ${errMsg}, transitioning to error state and scheduling reconnect`);
-    this.state = { status: 'error', error: errMsg };
-    this.clearTimers();
-    this.scheduleReconnect();
-  }
-
-  private scheduleReconnect(): void {
-    if (this.stopped) return;
-    const delay = Math.min(2000 * Math.pow(2, this.reconnectAttempt), RECONNECT_BACKOFF_MAX_MS);
-    this.reconnectAttempt += 1;
-    this.logger.info(`[OctoGateway] Reconnecting in ${delay}ms (attempt ${this.reconnectAttempt})`);
-    this.reconnectTimer = setTimeout(async () => {
-      this.reconnectTimer = null;
-      if (this.stopped || !this.account) return;
-      try {
-        await this.start(this.account);
-      } catch {
-        // start() already logged; schedule another attempt
-        this.scheduleReconnect();
-      }
-    }, delay);
   }
 
   private startHeartbeat(): void {
@@ -239,73 +136,7 @@ export class OctoGateway extends EventEmitter {
     }, 60_000);
   }
 
-  private buildInbound(msg: OctoRawMessage['message']): InboundMessage {
-    const channelType = msg.channel_type ?? (msg.channel_id ? OCTO_CHANNEL_TYPE.GROUP : OCTO_CHANNEL_TYPE.DM);
-    const chatId = msg.channel_id ?? msg.from_uid;
-    const content: ContentItem[] = this.parsePayload(msg.payload);
-
-    return {
-      messageId: String(msg.message_id),
-      content,
-      sender: { senderId: msg.from_uid, senderName: msg.from_uid },
-      timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
-      replyContext: {
-        chatId,
-        channelType: String(channelType),
-        connectionMode: 'websocket',
-        userId: msg.from_uid,
-        msgType: String(msg.payload.type),
-      },
-    };
-  }
-
-  private parsePayload(payload: OctoRawMessage['message']['payload']): ContentItem[] {
-    switch (payload.type) {
-      case OCTO_MESSAGE_TYPE.TEXT: return [{ type: 'text', text: payload.content ?? '' }];
-      case OCTO_MESSAGE_TYPE.IMAGE: return [{ type: 'image', url: payload.url }];
-      case OCTO_MESSAGE_TYPE.FILE: return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
-      default: return [{ type: 'text', text: payload.content ?? `[type=${payload.type}]` }];
-    }
-  }
-
-  // ---- WebSocket integration ----
-
-  /**
-   * Attempt to start WebSocket transport. Returns true on success.
-   * On failure, logs the error and returns false so the caller can
-   * fall back to HTTP polling.
-   */
-  private async tryStartWebSocket(wsUrl: string, uid: string, imToken: string): Promise<boolean> {
-    try {
-      const ws = new OctoWebSocket(this.logger);
-
-      ws.on('message', (msg: OctoWsMessage) => this.handleWsMessage(msg));
-
-      ws.on('disconnect', () => {
-        if (!this.stopped && this.wsActive) {
-          this.logger.warn('[OctoGateway] WS disconnected — OctoWebSocket will auto-reconnect');
-        }
-      });
-
-      await ws.connect(wsUrl, uid, imToken);
-      this.ws = ws;
-      this.wsActive = true;
-      return true;
-    } catch (err) {
-      this.logger.warn(
-        '[OctoGateway] WebSocket connection failed, falling back to polling:',
-        err instanceof Error ? err.message : err,
-      );
-      return false;
-    }
-  }
-
-  /**
-   * Convert an OctoWsMessage into the InboundMessage format
-   * and emit through the standard 'inbound' event — same dedup
-   * gate used by the polling path.
-   */
-  private handleWsMessage(msg: OctoWsMessage): void {
+  private handleMessage(msg: OctoWsMessage): void {
     const messageId = String(msg.messageId);
     if (this.seenMessageIds.has(messageId)) return;
     this.seenMessageIds.set(messageId, Date.now());
@@ -328,5 +159,14 @@ export class OctoGateway extends EventEmitter {
       },
     };
     this.emit('inbound', inbound);
+  }
+
+  private parsePayload(payload: OctoWsMessage['payload']): ContentItem[] {
+    switch (payload.type) {
+      case OCTO_MESSAGE_TYPE.TEXT: return [{ type: 'text', text: payload.content ?? '' }];
+      case OCTO_MESSAGE_TYPE.IMAGE: return [{ type: 'image', url: payload.url }];
+      case OCTO_MESSAGE_TYPE.FILE: return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
+      default: return [{ type: 'text', text: payload.content ?? `[type=${payload.type}]` }];
+    }
   }
 }

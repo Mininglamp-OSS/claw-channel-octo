@@ -12,8 +12,8 @@
        │                 │     ↓ emitInbound('octo', msg)  │
        ↓ Octo WebSocket     │   ClawService → ClawRuntime     │
   OctoGateway ──────────►│     ↓ Agent processes            │
-  (event polling /       │   ClawPluginHost                │
-   WS Phase 2)          │     ↓ sendOutbound('octo', resp) │
+         │   ClawPluginHost                │
+          │     ↓ sendOutbound('octo', resp) │
        ▲                 │                                 │
        │ REST API        └─────────────────────────────────┘
   OctoOutbound ◄──────────── Agent reply
@@ -41,7 +41,7 @@ claw-channel-octo/
 ├── src/                         # Plugin source (TypeScript)
 │   ├── index.ts                 # createOctoPlugin factory
 │   ├── octo-config.ts           # Settings → PluginAccount resolver
-│   ├── octo-gateway.ts          # WebSocket + polling fallback + heartbeat
+│   ├── octo-gateway.ts          # WebSocket + heartbeat + auto-reconnect
 │   ├── octo-outbound.ts         # Reply via Octo REST API
 │   └── octo-types.ts            # Channel/message constants
 └── skills are in octo-cli repo  # Not duplicated here

@@ -50,6 +50,6 @@ See [DESIGN.md](./DESIGN.md) for architecture overview.
 
 Key modules:
 - `src/index.ts` — Plugin factory (`createOctoPlugin`)
-- `src/octo-gateway.ts` — WebSocket connection + HTTP polling fallback
+- `src/octo-gateway.ts` — WebSocket connection + heartbeat + auto-reconnect
 - `src/octo-outbound.ts` — Reply via Octo REST API
 - `src/octo-config.ts` — Config resolver from settings.json
