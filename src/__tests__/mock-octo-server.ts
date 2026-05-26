@@ -91,8 +91,8 @@ export class MockOctoServer {
   }
 
   /**
-   * Inject a message to all connected WebSocket clients (simulates Octo
-   * sending a chat message to the bot).
+   * Inject a message to all connected WebSocket clients.
+   * Payload is sent as a direct JSON object per WuKongIM JSON-RPC protocol.
    */
   injectMessage(msg: {
     messageId: string;
@@ -103,7 +103,6 @@ export class MockOctoServer {
     payload: Record<string, unknown>;
     timestamp?: number;
   }): void {
-    const payloadB64 = Buffer.from(JSON.stringify(msg.payload)).toString('base64');
     const notification = {
       jsonrpc: '2.0',
       method: 'recv',
@@ -114,7 +113,7 @@ export class MockOctoServer {
         channelId: msg.channelId ?? '',
         channelType: msg.channelType ?? 1,
         fromUid: msg.fromUid,
-        payload: payloadB64,
+        payload: msg.payload, // Direct JSON object, not base64
         timestamp: msg.timestamp ?? Math.floor(Date.now() / 1000),
       },
     };

@@ -448,3 +448,25 @@ describe('Review Fixes', () => {
     });
   });
 });
+
+describe('WS Lifecycle Edge Cases', () => {
+  let server: MockOctoServer;
+
+  before(async () => { server = await startMockOctoServer(); });
+  after(async () => { await server.stop(); });
+  beforeEach(() => { server.reset(); });
+
+  const logger = { info: () => {}, warn: () => {}, error: () => {} };
+
+  it('gateway cleans up WS on connect failure after successful register', async () => {
+    // Server returns a ws_url that will refuse connections
+    server.wsRejectHandshake = true;
+    const plugin = createOctoPlugin({ logger });
+    const account = plugin.config.resolveAccount({ botToken: 'test', apiUrl: server.url });
+    await assert.rejects(() => plugin.gateway.start(account), /reasonCode=1/);
+    // Gateway must have cleaned up — no orphan sockets
+    await sleep(200);
+    assert.equal(server.connectedWsClients, 0);
+    assert.equal(plugin.gateway.getConnectionState().status, 'error');
+  });
+});

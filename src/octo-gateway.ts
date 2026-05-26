@@ -78,8 +78,9 @@ export class OctoGateway extends EventEmitter {
 
       this.logger.info(`[OctoGateway] Bot registered: ${robotId}`);
 
-      // Connect WebSocket
+      // Connect WebSocket — assign before connect so catch can clean up
       const ws = new OctoWebSocket(this.logger);
+      this.ws = ws;
       ws.on('message', (msg: OctoWsMessage) => this.handleMessage(msg));
       ws.on('connect', () => {
         if (!this.stopped) this.state = { status: 'connected' };
@@ -93,7 +94,6 @@ export class OctoGateway extends EventEmitter {
       });
 
       await ws.connect(wsUrl, robotId, imToken);
-      this.ws = ws;
 
       // Heartbeat + dedup cleanup
       this.startHeartbeat();
@@ -102,6 +102,11 @@ export class OctoGateway extends EventEmitter {
       this.state = { status: 'connected' };
       this.logger.info('[OctoGateway] Connected (websocket)');
     } catch (err) {
+      // Clean up any partially-connected WebSocket
+      if (this.ws) {
+        try { this.ws.removeAllListeners(); this.ws.disconnect(); } catch { /* ignore */ }
+        this.ws = null;
+      }
       const msg = err instanceof Error ? err.message : String(err);
       this.state = { status: 'error', error: msg };
       this.logger.error('[OctoGateway] Start failed:', msg);

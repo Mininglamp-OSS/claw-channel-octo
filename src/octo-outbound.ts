@@ -285,12 +285,18 @@ export class StreamingMessage {
     }
   }
 
-  /** Mark streaming complete with final text. */
+  /** Mark streaming complete with final text. State committed only after successful edit. */
   async finish(finalText?: string): Promise<void> {
     if (this.finished) return;
-    this.finished = true;
+    const prevText = this.text;
     if (finalText !== undefined) this.text = finalText;
-    await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+    try {
+      await this.outbound.editMessage(this.messageId, this.channelId, this.channelType, this.text);
+      this.finished = true;
+    } catch (err) {
+      this.text = prevText;
+      throw err;
+    }
   }
 
   getText(): string { return this.text; }

@@ -255,20 +255,21 @@ export class OctoWebSocket extends EventEmitter {
     const channelType = Number(params.channelType ?? 0);
     const fromUid = String(params.fromUid ?? '');
     const timestamp = typeof params.timestamp === 'number' ? params.timestamp : undefined;
-    const rawPayload = typeof params.payload === 'string' ? params.payload : '';
 
+    // WuKongIM JSON-RPC protocol: payload is a direct JSON object, not base64
     let payload: OctoWsMessage['payload'];
-    try {
-      const decoded = Buffer.from(rawPayload, 'base64').toString('utf-8');
-      payload = JSON.parse(decoded) as OctoWsMessage['payload'];
-    } catch (err) {
-      this.logger.warn(
-        `[OctoWebSocket] failed to decode payload for ${messageId}:`,
-        err instanceof Error ? err.message : err,
-      );
-      // Ack even on decode failure to avoid redelivery loop
-      this.sendAck(messageId, messageSeq, params.header);
-      return;
+    if (typeof params.payload === 'object' && params.payload !== null) {
+      payload = params.payload as OctoWsMessage['payload'];
+    } else if (typeof params.payload === 'string') {
+      // Legacy/compat: some older versions may send base64-encoded JSON
+      try {
+        const decoded = Buffer.from(params.payload, 'base64').toString('utf-8');
+        payload = JSON.parse(decoded) as OctoWsMessage['payload'];
+      } catch {
+        payload = { type: 1, content: params.payload };
+      }
+    } else {
+      payload = { type: 0 };
     }
 
     const msg: OctoWsMessage = { messageId, messageSeq, channelId, channelType, fromUid, timestamp, payload };
