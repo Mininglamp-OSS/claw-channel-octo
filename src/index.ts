@@ -75,8 +75,8 @@ export interface ContentItem {
 export interface OutboundMessage {
   /** Text content to send. */
   text?: string;
-  /** Files to send (uploaded URLs). */
-  files?: Array<{ url: string; name: string }>;
+  /** Files to send (uploaded URLs or local paths). */
+  files?: Array<{ url?: string; path?: string; name: string }>;
   /** 'streaming' sends typing indicator only; 'final' sends the actual message. */
   deliveryMode?: 'streaming' | 'final';
   /** Reply routing context from the original inbound message. */
@@ -88,6 +88,8 @@ export interface SendResult {
   success: boolean;
   /** Error description when success is false. */
   error?: string;
+  /** Message ID returned on successful send (used for streaming edits). */
+  messageId?: string;
 }
 
 /** Complete plugin interface registered with ClawPluginHost. */
@@ -103,7 +105,7 @@ export interface ClawPlugin {
   /** Outbound adapter for sending replies. */
   outbound: OctoOutbound;
   /** Declared capabilities of this channel. */
-  capabilities?: { supportedMessageTypes?: string[]; supportsStreaming?: boolean };
+  capabilities?: { supportedMessageTypes?: string[]; supportsStreaming?: boolean; supportsFileUpload?: boolean };
 }
 
 /** Factory function signature for creating a ClawPlugin. */
@@ -138,6 +140,7 @@ export function createOctoPlugin(ctx: PluginContext): ClawPlugin {
     capabilities: {
       supportedMessageTypes: ['text', 'image', 'file'],
       supportsStreaming: true,
+      supportsFileUpload: true,
     },
   };
 }

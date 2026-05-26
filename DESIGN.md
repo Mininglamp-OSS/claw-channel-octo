@@ -10,10 +10,10 @@
                          │                                 │
   Octo User @Bot         │   ClawPluginHost                │
        │                 │     ↓ emitInbound('octo', msg)  │
-       ↓ WuKongIM WS     │   ClawService → ClawRuntime     │
+       ↓ Octo WebSocket     │   ClawService → ClawRuntime     │
   OctoGateway ──────────►│     ↓ Agent processes            │
-  (event polling /       │   ClawPluginHost                │
-   WS Phase 2)          │     ↓ sendOutbound('octo', resp) │
+         │   ClawPluginHost                │
+          │     ↓ sendOutbound('octo', resp) │
        ▲                 │                                 │
        │ REST API        └─────────────────────────────────┘
   OctoOutbound ◄──────────── Agent reply
@@ -23,7 +23,7 @@
 ```
 
 **Two independent subsystems:**
-- **OctoGateway** (常驻耳朵) — WuKongIM WebSocket/polling, receives messages in real-time
+- **OctoGateway** (常驻耳朵) — Octo WebSocket (JSON-RPC), receives messages in real-time
 - **octo-cli** (Agent 的手) — AI exec calls `octo message send`, `octo group list`, etc.
 
 connectionMode: `"websocket"` — replies go via plugin.outbound, NOT copilot.tencent.com.
@@ -41,7 +41,7 @@ claw-channel-octo/
 ├── src/                         # Plugin source (TypeScript)
 │   ├── index.ts                 # createOctoPlugin factory
 │   ├── octo-config.ts           # Settings → PluginAccount resolver
-│   ├── octo-gateway.ts          # WuKongIM connection + polling + heartbeat
+│   ├── octo-gateway.ts          # WebSocket + heartbeat + auto-reconnect
 │   ├── octo-outbound.ts         # Reply via Octo REST API
 │   └── octo-types.ts            # Channel/message constants
 └── skills are in octo-cli repo  # Not duplicated here

@@ -1,52 +1,37 @@
 /**
- * Mock Octo HTTP API server for integration tests.
+ * Mock Octo server for integration tests.
  *
- * Spins up a local node:http server that simulates the Octo bot endpoints:
- *   POST   /v1/bot/register
- *   GET    /v1/bot/events?last_event_id=N&limit=N
- *   POST   /v1/bot/sendMessage
- *   POST   /v1/bot/typing
- *   POST   /v1/bot/heartbeat
- *   POST   /v1/bot/events/{event_id}/ack
- *
- * The server records every request for assertion and exposes mutable state
- * so each test can stage the events the gateway should observe on its next
- * poll, override response codes, or count specific calls.
+ * Provides both HTTP REST API (register, sendMessage, heartbeat, etc.)
+ * and a WebSocket server implementing the JSON-RPC protocol used by
+ * OctoWebSocket.
  */
-import { createServer, type Server as HttpServer, type IncomingHttpHeaders } from 'node:http';
+import { createServer, type Server as HttpServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
+import { WebSocketServer, WebSocket } from 'ws';
 
 export interface MockRequest {
   method: string;
   path: string;
   body: unknown;
-  headers: IncomingHttpHeaders;
+  headers: Record<string, string | string[] | undefined>;
 }
-
-export type PollHook = ((requestCount: number) => { status: number; body: unknown } | null) | null;
 
 export class MockOctoServer {
   readonly requests: MockRequest[] = [];
-  /** Events queued for the next GET /v1/bot/events poll. Drained on read. */
-  events: unknown[] = [];
   registerStatus = 200;
-  registerResponse: unknown = {
-    robot_id: 'test_bot',
-    im_token: 'test_token',
-    ws_url: 'ws://localhost:1',
-  };
   sendMessageStatus = 200;
-  sendMessageResponse: unknown = { success: true };
-  /** Optional hook to override poll responses on a per-call basis. */
-  pollHook: PollHook = null;
+  sendMessageResponse: unknown = { success: true, message_id: 'mock_msg_001' };
+  /** When true, WS handshake returns reasonCode: 1 (rejected). */
+  wsRejectHandshake = false;
 
-  private pollCount = 0;
   private server!: HttpServer;
+  private wss!: WebSocketServer;
+  private wsClients: WebSocket[] = [];
   private _port = 0;
 
   get port(): number { return this._port; }
   get url(): string { return `http://127.0.0.1:${this._port}`; }
-  get pollRequestCount(): number { return this.pollCount; }
+  get wsUrl(): string { return `ws://127.0.0.1:${this._port}`; }
 
   async start(): Promise<void> {
     this.server = createServer((req, res) => {
@@ -55,15 +40,23 @@ export class MockOctoServer {
       req.on('end', () => {
         let parsed: unknown = null;
         if (body.length > 0) {
-          try { parsed = JSON.parse(body); }
-          catch { parsed = body; }
+          try { parsed = JSON.parse(body); } catch { parsed = body; }
         }
         const url = req.url ?? '';
         const method = req.method ?? '';
-        this.requests.push({ method, path: url, body: parsed, headers: req.headers });
+        this.requests.push({ method, path: url, body: parsed, headers: req.headers as Record<string, string | string[] | undefined> });
         this.route(url, method, res);
       });
       req.on('error', () => { /* swallow */ });
+    });
+
+    this.wss = new WebSocketServer({ server: this.server });
+    this.wss.on('connection', (ws) => {
+      this.wsClients.push(ws);
+      ws.on('message', (data: Buffer | ArrayBuffer | Buffer[]) => this.handleWsMessage(ws, data as Buffer));
+      ws.on('close', () => {
+        this.wsClients = this.wsClients.filter(c => c !== ws);
+      });
     });
 
     await new Promise<void>((resolve, reject) => {
@@ -77,23 +70,92 @@ export class MockOctoServer {
   }
 
   async stop(): Promise<void> {
-    if (!this.server) return;
-    await new Promise<void>((resolve) => this.server.close(() => resolve()));
+    for (const ws of this.wsClients) {
+      try { ws.close(); } catch { /* ignore */ }
+    }
+    this.wsClients = [];
+    if (this.wss) await new Promise<void>((resolve) => this.wss.close(() => resolve()));
+    if (this.server) await new Promise<void>((resolve) => this.server.close(() => resolve()));
   }
 
-  /** Reset request log + queued events; keep listening port. */
   reset(): void {
     this.requests.length = 0;
-    this.events = [];
-    this.pollCount = 0;
-    this.pollHook = null;
     this.registerStatus = 200;
     this.sendMessageStatus = 200;
+    this.sendMessageResponse = { success: true, message_id: 'mock_msg_001' };
+    this.wsRejectHandshake = false;
   }
 
-  /** Count requests matching a predicate (e.g. by path). */
   countRequests(predicate: (r: MockRequest) => boolean): number {
     return this.requests.filter(predicate).length;
+  }
+
+  /**
+   * Inject a message to all connected WebSocket clients.
+   * Payload is sent as a direct JSON object per WuKongIM JSON-RPC protocol.
+   */
+  injectMessage(msg: {
+    messageId: string;
+    messageSeq?: number;
+    channelId?: string;
+    channelType?: number;
+    fromUid: string;
+    payload: Record<string, unknown>;
+    timestamp?: number;
+  }): void {
+    const notification = {
+      jsonrpc: '2.0',
+      method: 'recv',
+      params: {
+        header: {},
+        messageId: msg.messageId,
+        messageSeq: msg.messageSeq ?? 1,
+        channelId: msg.channelId ?? '',
+        channelType: msg.channelType ?? 1,
+        fromUid: msg.fromUid,
+        payload: msg.payload, // Direct JSON object, not base64
+        timestamp: msg.timestamp ?? Math.floor(Date.now() / 1000),
+      },
+    };
+    for (const ws of this.wsClients) {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify(notification));
+      }
+    }
+  }
+
+  get connectedWsClients(): number { return this.wsClients.length; }
+
+  private handleWsMessage(ws: WebSocket, data: Buffer): void {
+    let parsed: { jsonrpc?: string; method?: string; params?: Record<string, unknown>; id?: string };
+    try {
+      parsed = JSON.parse(String(data));
+    } catch { return; }
+
+    if (parsed.method === 'connect') {
+      if (this.wsRejectHandshake) {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { serverKey: 'test', salt: 'test', timeDiff: 0, reasonCode: 1 },
+        }));
+      } else {
+        ws.send(JSON.stringify({
+          jsonrpc: '2.0',
+          id: parsed.id,
+          result: { serverKey: 'test', salt: 'test', timeDiff: 0, reasonCode: 0 },
+        }));
+      }
+      return;
+    }
+    if (parsed.method === 'ping') {
+      ws.send(JSON.stringify({ jsonrpc: '2.0', method: 'pong', params: {} }));
+      return;
+    }
+    if (parsed.method === 'recvack') {
+      // Ack received — no-op for tests
+      return;
+    }
   }
 
   private route(url: string, method: string, res: import('node:http').ServerResponse): void {
@@ -103,16 +165,16 @@ export class MockOctoServer {
     };
 
     if (url === '/v1/bot/register' && method === 'POST') {
-      return json(this.registerStatus, this.registerResponse);
-    }
-    if (url.startsWith('/v1/bot/events?') && method === 'GET') {
-      this.pollCount += 1;
-      if (this.pollHook) {
-        const override = this.pollHook(this.pollCount);
-        if (override) return json(override.status, override.body);
+      if (this.registerStatus >= 400) {
+        return json(this.registerStatus, { error: 'register failed' });
       }
-      const drained = this.events.splice(0);
-      return json(200, drained);
+      return json(200, {
+        robot_id: 'test_bot',
+        im_token: 'test_im_token',
+        ws_url: this.wsUrl,
+        api_url: this.url,
+        owner_uid: 'owner_001',
+      });
     }
     if (url === '/v1/bot/sendMessage' && method === 'POST') {
       return json(this.sendMessageStatus, this.sendMessageResponse);
@@ -123,22 +185,23 @@ export class MockOctoServer {
     if (url === '/v1/bot/heartbeat' && method === 'POST') {
       return json(200, {});
     }
-    if (/^\/v1\/bot\/events\/[^/]+\/ack$/.test(url) && method === 'POST') {
-      return json(200, {});
+    if (url === '/v1/bot/message/edit' && method === 'POST') {
+      return json(200, { success: true });
+    }
+    if (url === '/v1/bot/file/upload' && method === 'POST') {
+      return json(200, { url: 'https://octo.storage/uploaded-file.pdf', name: 'file.pdf', size: 1024 });
     }
     res.writeHead(404);
     res.end('not found');
   }
 }
 
-/** Convenience: spin up a fresh server for a test suite. */
 export async function startMockOctoServer(): Promise<MockOctoServer> {
   const srv = new MockOctoServer();
   await srv.start();
   return srv;
 }
 
-/** Wait for an event emitter to emit a named event, with a timeout. */
 export function waitForEvent<T = unknown>(
   emitter: { once: (ev: string, fn: (data: T) => void) => void; off?: (ev: string, fn: (data: T) => void) => void },
   event: string,
