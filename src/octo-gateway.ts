@@ -1,4 +1,3 @@
-import { EventEmitter } from 'node:events';
 import { request } from 'undici';
 import type { ConnectionState, PluginAccount, InboundMessage, ContentItem } from './index.js';
 import { OCTO_CHANNEL_TYPE, OCTO_MESSAGE_TYPE } from './octo-types.js';
@@ -10,20 +9,24 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 const REQUEST_OPTS = { headersTimeout: 10_000, bodyTimeout: 30_000 } as const;
 
 /**
- * OctoGateway manages the real-time WebSocket connection to Octo.
+ * OctoGateway — WebSocket connection to Octo.
  *
- * Transport: JSON-RPC over WebSocket. No fallback — if the WebSocket
- * connection fails, the gateway throws so the caller knows something
- * is wrong (bad config, service down) instead of silently degrading.
+ * ClawPluginHost injects callbacks:
+ *   gateway.onInboundMessage = (msg) => ...
+ *   gateway.onConnectionStateChange = (state) => ...
  *
- * REST heartbeat is kept separately for bot online status tracking.
- *
- * Emits 'inbound' event with InboundMessage when a message arrives.
+ * Does NOT extend EventEmitter — uses callback properties per ClawPluginHost contract.
  */
-export class OctoGateway extends EventEmitter {
+export class OctoGateway {
+  /** ClawPluginHost injects this to receive messages. */
+  onInboundMessage: ((msg: InboundMessage) => void) | null = null;
+  /** ClawPluginHost injects this to track connection state. */
+  onConnectionStateChange: ((state: ConnectionState) => void) | null = null;
+
   private state: ConnectionState = { status: 'disconnected' };
   private apiUrl = '';
   private botToken = '';
+  private botUid = '';
   private account: PluginAccount | null = null;
   private ws: OctoWebSocket | null = null;
   private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
@@ -34,11 +37,16 @@ export class OctoGateway extends EventEmitter {
   constructor(
     private logger: Logger,
     private onAccountResolved?: (account: PluginAccount) => void,
-  ) { super(); }
+  ) {}
 
   getConnectionState(): ConnectionState { return this.state; }
 
-  async start(account: PluginAccount): Promise<void> {
+  private setState(s: ConnectionState): void {
+    this.state = s;
+    this.onConnectionStateChange?.(s);
+  }
+
+  async startAccount(account: PluginAccount): Promise<void> {
     this.onAccountResolved?.(account);
     const botToken = typeof account.credential.botToken === 'string' ? account.credential.botToken : '';
     const apiUrl = typeof account.credential.apiUrl === 'string' ? account.credential.apiUrl : '';
@@ -49,12 +57,11 @@ export class OctoGateway extends EventEmitter {
     this.apiUrl = apiUrl;
     this.account = account;
     this.stopped = false;
-    this.state = { status: 'connecting' };
+    this.setState({ status: 'connecting' });
 
     this.logger.info('[OctoGateway] Starting with apiUrl:', apiUrl);
 
     try {
-      // Register bot — check status FIRST, parse JSON only on success
       const regRes = await request(`${apiUrl}/v1/bot/register`, {
         method: 'POST',
         headers: { Authorization: `Bearer ${botToken}`, 'Content-Type': 'application/json' },
@@ -73,48 +80,38 @@ export class OctoGateway extends EventEmitter {
       const robotId = typeof regData.robot_id === 'string' ? regData.robot_id : '';
 
       if (!wsUrl || !imToken || !robotId) {
-        throw new Error('Register response missing ws_url, im_token, or robot_id — cannot connect');
+        throw new Error('Register response missing ws_url, im_token, or robot_id');
       }
 
+      this.botUid = robotId;
       this.logger.info(`[OctoGateway] Bot registered: ${robotId}`);
 
-      // Connect WebSocket — assign before connect so catch can clean up
       const ws = new OctoWebSocket(this.logger);
       this.ws = ws;
       ws.on('message', (msg: OctoWsMessage) => this.handleMessage(msg));
-      ws.on('connect', () => {
-        if (!this.stopped) this.state = { status: 'connected' };
-      });
-      ws.on('disconnect', () => {
-        if (!this.stopped) this.state = { status: 'connecting' };
-      });
-      ws.on('fatal', (err: Error) => {
-        this.state = { status: 'error', error: err.message };
-        this.logger.error('[OctoGateway] WebSocket fatal:', err.message);
-      });
+      ws.on('connect', () => { if (!this.stopped) this.setState({ status: 'connected' }); });
+      ws.on('disconnect', () => { if (!this.stopped) this.setState({ status: 'connecting' }); });
+      ws.on('fatal', (err: Error) => { this.setState({ status: 'error', error: err.message }); });
 
       await ws.connect(wsUrl, robotId, imToken);
 
-      // Heartbeat + dedup cleanup
       this.startHeartbeat();
       this.startDedupCleanup();
-
-      this.state = { status: 'connected' };
+      this.setState({ status: 'connected' });
       this.logger.info('[OctoGateway] Connected (websocket)');
     } catch (err) {
-      // Clean up any partially-connected WebSocket
       if (this.ws) {
         try { this.ws.removeAllListeners(); this.ws.disconnect(); } catch { /* ignore */ }
         this.ws = null;
       }
       const msg = err instanceof Error ? err.message : String(err);
-      this.state = { status: 'error', error: msg };
+      this.setState({ status: 'error', error: msg });
       this.logger.error('[OctoGateway] Start failed:', msg);
       throw err;
     }
   }
 
-  async stop(): Promise<void> {
+  async stopAccount(): Promise<void> {
     this.stopped = true;
     if (this.heartbeatTimer) { clearInterval(this.heartbeatTimer); this.heartbeatTimer = null; }
     if (this.dedupCleanupTimer) { clearInterval(this.dedupCleanupTimer); this.dedupCleanupTimer = null; }
@@ -123,7 +120,7 @@ export class OctoGateway extends EventEmitter {
       this.ws = null;
     }
     this.seenMessageIds.clear();
-    this.state = { status: 'disconnected' };
+    this.setState({ status: 'disconnected' });
     this.logger.info('[OctoGateway] Stopped');
   }
 
@@ -159,11 +156,21 @@ export class OctoGateway extends EventEmitter {
     const chatId = msg.channelId || msg.fromUid;
     const content: ContentItem[] = this.parsePayload(msg.payload);
 
+    // Determine group info
+    const isGroup = channelType === OCTO_CHANNEL_TYPE.GROUP || channelType === 5; // 5 = Thread
+    const group = isGroup ? { groupId: chatId, chatType: 'group' as const } : undefined;
+
+    // Detect @bot mention
+    const textContent = msg.payload.content ?? '';
+    const botMentioned = isGroup ? textContent.includes(`@${this.botUid}`) || textContent.includes('@所有人') : undefined;
+
     const inbound: InboundMessage = {
       messageId,
       content,
       sender: { senderId: msg.fromUid, senderName: msg.fromUid },
       timestamp: msg.timestamp ? new Date(msg.timestamp * 1000).toISOString() : new Date().toISOString(),
+      group,
+      botMentioned,
       replyContext: {
         chatId,
         channelType: String(channelType),
@@ -172,7 +179,7 @@ export class OctoGateway extends EventEmitter {
         msgType: String(msg.payload.type),
       },
     };
-    this.emit('inbound', inbound);
+    this.onInboundMessage?.(inbound);
   }
 
   private parsePayload(payload: OctoWsMessage['payload']): ContentItem[] {
@@ -181,15 +188,15 @@ export class OctoGateway extends EventEmitter {
         return [{ type: 'text', text: payload.content ?? '' }];
       case OCTO_MESSAGE_TYPE.IMAGE:
       case 3: // GIF
-        return [{ type: 'image', url: payload.url }];
+        return [{ type: 'image', url: payload.url, mimeType: payload.type === 3 ? 'image/gif' : undefined }];
       case 4: // Voice
-        return [{ type: 'file', url: payload.url, name: 'voice' }];
+        return [{ type: 'file', url: payload.url, name: 'voice', mimeType: 'audio/mpeg' }];
       case 5: // Video
-        return [{ type: 'file', url: payload.url, name: payload.name ?? 'video' }];
+        return [{ type: 'file', url: payload.url, name: payload.name ?? 'video', mimeType: 'video/mp4' }];
       case OCTO_MESSAGE_TYPE.FILE:
         return [{ type: 'file', url: payload.url, name: payload.name, size: payload.size }];
       default:
-        this.logger.warn(`[OctoGateway] Unknown payload type ${payload.type}, treating as text`);
+        this.logger.warn(`[OctoGateway] Unknown payload type ${payload.type}`);
         return [{ type: 'text', text: payload.content ?? `[unsupported type=${payload.type}]` }];
     }
   }

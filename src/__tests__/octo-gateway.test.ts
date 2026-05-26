@@ -16,7 +16,7 @@ describe('OctoGateway', () => {
     const gw = new OctoGateway(logger, () => { resolved = true; });
     // start() will fail because there's no real API, but callback should fire first
     try {
-      await gw.start({
+      await gw.startAccount({
         accountId: 'test',
         credential: { botToken: 'fake', apiUrl: 'http://localhost:1' },
       });
@@ -29,7 +29,7 @@ describe('OctoGateway', () => {
   it('sets state to error on start failure', async () => {
     const gw = new OctoGateway(logger);
     try {
-      await gw.start({
+      await gw.startAccount({
         accountId: 'test',
         credential: { botToken: 'fake', apiUrl: 'http://localhost:1' },
       });
@@ -43,7 +43,7 @@ describe('OctoGateway', () => {
 
   it('stop() sets state to disconnected', async () => {
     const gw = new OctoGateway(logger);
-    await gw.stop();
+    await gw.stopAccount();
     assert.deepEqual(gw.getConnectionState(), { status: 'disconnected' });
   });
 });

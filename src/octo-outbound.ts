@@ -48,6 +48,8 @@ function mimeFromFilename(filename: string): string {
 export class OctoOutbound {
   private apiUrl = '';
   private botToken = '';
+  /** Tracks thinking message IDs per chat for ack→final edit flow. */
+  private thinkingStreams = new Map<string, string>();
 
   constructor(private logger: Logger) {}
 
@@ -69,42 +71,66 @@ export class OctoOutbound {
     if (!chatId) {
       return { success: false, error: 'Missing chatId in replyContext' };
     }
-    if (!text && (!message.files || message.files.length === 0)) {
-      return { success: false, error: 'No text or files to send' };
-    }
 
     try {
+      // --- Handle deliveryMode="ack" — send thinking placeholder ---
+      if (message.deliveryMode === 'ack') {
+        const msgId = await this.sendMessage(chatId, channelType, { type: 1, content: '…' });
+        if (msgId) {
+          this.thinkingStreams.set(chatId, msgId);
+        }
+        return { success: true };
+      }
+
+      // --- Handle exec_approval metadata — send immediately regardless of mode ---
+      if (message.metadata?.state?.startsWith('exec_approval')) {
+        if (text) await this.sendMessage(chatId, channelType, { type: 1, content: text });
+        return { success: true };
+      }
+
+      // --- Handle deliveryMode="streaming" — typing indicator ---
       if (message.deliveryMode === 'streaming') {
         await this.sendTyping(chatId, channelType);
         return { success: true };
       }
 
-      // --- Atomic send: resolve all file URLs FIRST, then send messages ---
-      // If any upload fails, nothing has been sent yet, so retry is safe.
+      // --- Handle deliveryMode="final" or default — send actual content ---
+      if (!text && (!message.files || message.files.length === 0) && (!message.artifactFiles || message.artifactFiles.length === 0)) {
+        return { success: false, error: 'No text or files to send' };
+      }
+
+      // Resolve all files (files + artifactFiles) atomically
+      const allRawFiles = [...(message.files ?? []), ...(message.artifactFiles ?? [])];
       const resolvedFiles: Array<{ url: string; name: string }> = [];
-      if (message.files) {
-        for (const file of message.files) {
-          if (file.url) {
-            resolvedFiles.push({ url: file.url, name: file.name });
-          } else if (file.path) {
-            const uploaded = await this.uploadFile(file.path);
-            resolvedFiles.push({ url: uploaded.url, name: file.name || uploaded.name });
-          } else {
-            return { success: false, error: `File "${file.name}" has neither url nor path` };
-          }
+      for (const file of allRawFiles) {
+        if (file.url) {
+          resolvedFiles.push({ url: file.url, name: file.name });
+        } else if (file.path) {
+          const uploaded = await this.uploadFile(file.path);
+          resolvedFiles.push({ url: uploaded.url, name: file.name || uploaded.name });
+        } else {
+          return { success: false, error: `File "${file.name}" has neither url nor path` };
         }
       }
 
-      // Now send — text first, then files
+      // If we have a thinking stream for this chat, edit it with final text
       let messageId: string | undefined;
-      if (text) {
+      const thinkingMsgId = this.thinkingStreams.get(chatId);
+      if (thinkingMsgId && text) {
+        await this.editMessage(thinkingMsgId, chatId, channelType, text);
+        this.thinkingStreams.delete(chatId);
+        messageId = thinkingMsgId;
+      } else if (text) {
         messageId = await this.sendMessage(chatId, channelType, { type: 1, content: text });
+        this.thinkingStreams.delete(chatId); // clear stale if any
       }
+
+      // Send files
       for (const file of resolvedFiles) {
         await this.sendMessage(chatId, channelType, { type: 8, url: file.url, name: file.name });
       }
 
-      this.logger.info(`[OctoOutbound] Sent reply to ${chatId} (type=${channelType}), textLen=${text.length}, files=${resolvedFiles.length}`);
+      this.logger.info(`[OctoOutbound] Sent to ${chatId} (type=${channelType}), text=${text.length}, files=${resolvedFiles.length}`);
       return { success: true, messageId };
     } catch (err) {
       const errMsg = err instanceof Error ? err.message : String(err);
